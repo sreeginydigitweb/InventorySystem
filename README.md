@@ -26,8 +26,41 @@ The system will eventually cover:
 | Transfers | Stock moving between locations |
 | Inventory Audit | Counting stock and reconciling what is found against what is expected |
 
-At present the repository contains the standard structure only. No application
-code has been built yet.
+All six areas are built and run against the dummy data.
+
+## Running it
+
+Node 20 or newer. There are no dependencies to install.
+
+```
+npm start     # http://localhost:3000/
+npm test      # the test suite
+```
+
+`documentation/smart-inventory-control-mvp.md` covers the dummy data structure,
+the detection rules and each of the six areas in detail.
+
+## How the application is laid out
+
+Data, business logic and rendering are kept apart. Filtering runs on the server
+from the query string; the only client-side JavaScript is `/filters.js`, a
+single same-origin file that submits a filter bar when one of its dropdowns
+changes, so the filters need no Apply button.
+
+| Path | Responsibility |
+| --- | --- |
+| `inventory/data/` | The dummy dataset. No logic. Seeds the session at startup. |
+| `inventory/store.js` | The only place data changes: validation and the add/edit/delete operations. |
+| `inventory/rules.js` | The six detection rules and the stock health bands. |
+| `inventory/reports.js` | Derived views: dashboard figures, audit differences, per-screen rows. |
+| `inventory/render.js` | HTML only. |
+| `inventory/router.js` | Path and query to a response, and form posts to a write. Pure, so both are testable without a server. |
+| `inventory/server.js` | The HTTP shell. |
+
+Records can be added, edited and deleted through the screens. There is still no
+database: the dummy arrays are the seed, changes live in memory for the life of
+the server, and a restart puts everything back. Available stock and the audit
+difference are always calculated, never entered.
 
 ## Standard folders
 

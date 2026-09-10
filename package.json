@@ -8,6 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "start": "node inventory/server.js",
     "test": "node --test"
   }
 }
