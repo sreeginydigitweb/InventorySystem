@@ -1,0 +1,13 @@
+{
+  "name": "smart-inventory-control",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Smart Inventory Control. Mini-AIOS standard repository for the dummy-data inventory and stock control MVP.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

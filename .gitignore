@@ -1,0 +1,55 @@
+# Windows OS files
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS / Linux OS files (in case the repository is opened elsewhere)
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+*~
+.fuse_hidden*
+.directory
+.nfs*
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+*.code-workspace
+
+# Office and editor lock/temporary files
+~$*
+*.tmp
+*.temp
+*.bak
+
+# Logs
+*.log
+logs/
+
+# Archives and local scratch output
+*.zip
+*.7z
+*.rar
+
+# Credentials and secrets - never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+credentials.json
+secrets.json
+appsettings.Local.json
