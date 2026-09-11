@@ -1,5 +1,5 @@
 /**
- * Inventory audit counts for the dummy dataset.
+ * Inventory audit counts for the test dataset.
  *
  * Each record is one physical count of one SKU at one warehouse. All counts are
  * invented.

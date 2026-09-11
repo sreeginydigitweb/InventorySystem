@@ -102,8 +102,14 @@ describe('layout', () => {
     assert.match(page, /<a href="\/" aria-current="page">Dashboard<\/a>/);
   });
 
-  test('says on every page that the data is not real', () => {
-    assert.match(page, /Dummy data/);
+  test('makes no claim that the data is not real', () => {
+    // It is real: every figure on every screen comes from ledsone, the
+    // business's own inventory database. The page shell used to say otherwise
+    // on every screen, which stopped being true when the demonstration data was
+    // taken out.
+    for (const claim of [/Dummy data/i, /invented/i, /demonstration MVP/i]) {
+      assert.equal(claim.test(page), false, `the page shell still says ${claim}`);
+    }
   });
 
   test('carries exactly one script, from this origin, and no inline handler', () => {

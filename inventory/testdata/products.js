@@ -1,5 +1,5 @@
 /**
- * Product catalogue for the dummy dataset.
+ * Product catalogue for the test dataset.
  *
  * Every product, supplier and SKU here is invented. Nothing in this file comes
  * from a real catalogue, a real supplier or a live inventory system.

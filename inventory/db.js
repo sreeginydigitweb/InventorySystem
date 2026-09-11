@@ -2,9 +2,35 @@
  * The PostgreSQL connection for Smart Inventory Control.
  *
  * One pool, opened lazily, shared by every query in the system. Nothing else in
- * the application talks to `pg` directly - store.js and reports.js go through
- * query() and withTransaction() below, so there is exactly one place that knows
- * how a connection is made.
+ * the application talks to `pg` directly - source.js goes through query() and
+ * rows() below, so there is exactly one place that knows how a connection is
+ * made.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SOURCE DATABASE IS READ-ONLY
+ *
+ * This application does not own its data. `ledsone` is an existing business
+ * database and the source of truth for stock; this system only reports on what
+ * is already in it. There is no write path anywhere in this application, and
+ * three separate things stop one appearing by accident:
+ *
+ *   1. No statement in this codebase is anything but a SELECT. There is no
+ *      INSERT, UPDATE, DELETE, CREATE, ALTER, DROP or TRUNCATE in the module
+ *      graph the server loads.
+ *
+ *   2. Every connection this pool opens starts with
+ *      `default_transaction_read_only = on` (see poolConfig below), so the
+ *      SERVER refuses a write on this connection even if one were issued -
+ *      "cannot execute INSERT in a read-only transaction". It is set as a
+ *      connection option rather than a statement, so it is already in force on
+ *      the very first query and cannot be missed.
+ *
+ *   3. The role the application connects as has no INSERT, UPDATE, DELETE or
+ *      CREATE privilege on the source schemas. Verified with
+ *      has_table_privilege(); checkConnection() re-checks it at startup and
+ *      refuses to start if that ever stops being true.
+ *
+ * Any one of the three would be enough. All three are in place.
  *
  * ---------------------------------------------------------------------------
  * CONFIGURATION
@@ -21,10 +47,15 @@
  * ---------------------------------------------------------------------------
  * SCOPE
  *
- * Every statement this application issues is qualified with the schema below.
- * It reads and writes ONE schema - `inventory_control`, unless DB_SCHEMA names
- * another - and nothing else: the other schemas in this database belong to
- * other applications and are never referenced.
+ * Every statement this application issues is qualified with one of the three
+ * schemas named below, and reads only:
+ *
+ *   inventory         products, warehouses, physical stock, images
+ *   suppliers         which supplier a SKU was last ordered from
+ *   order_management  units sold, for the slow-moving rule
+ *
+ * The other schemas in the database belong to other applications and are never
+ * referenced.
  */
 
 import { readFileSync } from 'node:fs';
@@ -38,10 +69,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 /**
  * DATE columns come back as 'YYYY-MM-DD' rather than a Date.
  *
- * The application treats `raisedOn` and `countedOn` as plain calendar dates and
- * prints them as they are. Letting node-postgres build a Date would drag the
- * server's timezone into a value that has no time in it, and a count taken on
- * the 9th could display as the 8th.
+ * The application treats calendar dates as plain dates and prints them as they
+ * are. Letting node-postgres build a Date would drag the server's timezone into
+ * a value that has no time in it.
  */
 pg.types.setTypeParser(1082, (value) => value);
 
@@ -78,30 +108,42 @@ const fileEnv = readEnvFile();
 const setting = (name) => process.env[name] ?? fileEnv[name] ?? '';
 
 /**
- * The only schema this application touches.
+ * Check a configured schema name and hand it back.
  *
- * 'inventory_control' unless DB_SCHEMA says otherwise. The setting exists for
- * one reason: the test suite empties and reseeds every table it uses, which
- * must never happen to the schema the application serves. Tests therefore run
- * with DB_SCHEMA pointed at inventory_control_test (inventory/test.env), and
- * fixture/load.js refuses outright to delete or seed when this resolves to
- * inventory_control - so the application's data is untouchable from a test run
- * even if this setting is wrong.
- *
- * The name is interpolated into SQL rather than passed as a parameter - an
+ * A schema name is interpolated into SQL rather than passed as a parameter - an
  * identifier cannot be a placeholder - so it is checked against the shape of a
  * plain unquoted identifier first. Anything else is refused here rather than
  * reaching the server.
+ *
+ * @param {string} name
+ * @param {string} fallback
+ * @returns {string}
  */
-export const SCHEMA = (() => {
-  const name = setting('DB_SCHEMA') || 'inventory_control';
+function schemaName(name, fallback) {
+  const value = setting(name) || fallback;
 
-  if (!/^[a-z_][a-z0-9_]*$/.test(name)) {
-    throw new Error(`DB_SCHEMA is not a usable schema name: ${JSON.stringify(name)}.`);
+  if (!/^[a-z_][a-z0-9_]*$/.test(value)) {
+    throw new Error(`${name} is not a usable schema name: ${JSON.stringify(value)}.`);
   }
 
-  return name;
-})();
+  return value;
+}
+
+/** Products, warehouses, physical stock and images. */
+export const INVENTORY_SCHEMA = schemaName('DB_INVENTORY_SCHEMA', 'inventory');
+
+/** Purchase orders, used for the supplier shown against a SKU. */
+export const SUPPLIERS_SCHEMA = schemaName('DB_SUPPLIERS_SCHEMA', 'suppliers');
+
+/** Sales orders, used for units sold in the last 90 days. */
+export const ORDERS_SCHEMA = schemaName('DB_ORDERS_SCHEMA', 'order_management');
+
+/** Every schema this application is allowed to read, for the startup check. */
+export const READ_SCHEMAS = Object.freeze([
+  INVENTORY_SCHEMA,
+  SUPPLIERS_SCHEMA,
+  ORDERS_SCHEMA,
+]);
 
 /**
  * Build the pool configuration, complaining clearly about anything missing.
@@ -128,14 +170,26 @@ function poolConfig() {
     user: setting('DB_USER'),
     password: setting('DB_PASSWORD'),
     database: setting('DB_NAME'),
+    // THE READ-ONLY LATCH. Sent as a startup option, so it is in force before
+    // the first query rather than after a statement somebody could forget to
+    // issue. With this set, the server itself refuses any INSERT, UPDATE,
+    // DELETE, CREATE, ALTER, DROP or TRUNCATE on this connection, whatever the
+    // application asks for. This is the line that makes "read-only" a property
+    // of the connection rather than a promise about the code.
+    options: '-c default_transaction_read_only=on',
     // The server presents a self-signed certificate, so the connection is
     // encrypted but the certificate chain is not verified. sslmode=require,
     // not verify-full.
     ssl: wantsTls ? { rejectUnauthorized: false } : false,
-    max: Number(setting('DB_POOL_MAX') || 10),
+    // Deliberately small. The database role this application connects as is
+    // shared with the other applications on this server, and the role has a
+    // connection limit covering all of them together - so a pool sized for
+    // this application alone can exhaust the role and lock everyone out,
+    // including itself at startup.
+    max: Number(setting('DB_POOL_MAX') || 3),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 15_000,
-    application_name: 'smart-inventory-control',
+    application_name: 'smart-inventory-control (read-only)',
   };
 }
 
@@ -194,60 +248,62 @@ export async function firstRow(text, params = []) {
 }
 
 /**
- * Run several statements as one transaction on a single client.
- *
- * Used wherever a change is only correct if all of it happens - deleting a
- * product together with the records that point at it, or reseeding.
- *
- * @template T
- * @param {(client: import('pg').PoolClient) => Promise<T>} work
- * @returns {Promise<T>}
- */
-export async function withTransaction(work) {
-  const client = await getPool().connect();
-
-  try {
-    await client.query('BEGIN');
-    const result = await work(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-/**
- * Check the database is reachable and the schema is present.
+ * Check the source is reachable, readable, and still read-only to us.
  *
  * Called once at startup so a misconfigured deployment fails immediately with
  * something readable, rather than on the first page a member of staff opens.
  *
- * @returns {Promise<{database: string, user: string, tables: number}>}
+ * The last of the three checks is the important one: it asks the server whether
+ * this role could write to the source if it tried. If the answer ever becomes
+ * yes - somebody granted the role more than it needs - the application refuses
+ * to start rather than running with a privilege it has no business holding.
+ *
+ * @returns {Promise<{database: string, user: string, readOnly: boolean, tables: number}>}
  */
 export async function checkConnection() {
   const info = await firstRow(
-    `SELECT current_database() AS database,
-            current_user AS "user",
+    `SELECT current_database()                       AS database,
+            current_user                             AS "user",
+            current_setting('transaction_read_only')  AS read_only,
             (SELECT count(*)::int FROM information_schema.tables
-              WHERE table_schema = $1) AS tables`,
-    [SCHEMA],
+              WHERE table_schema = $1)               AS tables,
+            (has_table_privilege($2, 'INSERT')
+             OR has_table_privilege($2, 'UPDATE')
+             OR has_table_privilege($2, 'DELETE'))   AS can_write`,
+    [INVENTORY_SCHEMA, `${INVENTORY_SCHEMA}.products`],
   );
 
   if (info.tables === 0) {
     throw new Error(
-      `Connected to ${info.database}, but the ${SCHEMA} schema has no tables. ` +
-        'Run sql/001-inventory-control-schema.sql first.',
+      `Connected to ${info.database}, but it has no ${INVENTORY_SCHEMA} schema. ` +
+        'DB_NAME must name the source database (ledsone).',
     );
   }
 
-  return info;
+  if (info.read_only !== 'on') {
+    throw new Error(
+      'The connection to the source database is not read-only. Refusing to start: ' +
+        'this application must never be able to write to the source.',
+    );
+  }
+
+  if (info.can_write === true) {
+    throw new Error(
+      `The role ${info.user} holds write privileges on ${INVENTORY_SCHEMA}.products. ` +
+        'Refusing to start: the source database must be read-only to this application.',
+    );
+  }
+
+  return {
+    database: info.database,
+    user: info.user,
+    readOnly: info.read_only === 'on',
+    tables: info.tables,
+  };
 }
 
 /**
- * Close the pool. For tests and for a clean shutdown.
+ * Close the pool. For a clean shutdown.
  *
  * @returns {Promise<void>}
  */

@@ -20,6 +20,7 @@
 
 import {
   STOCK_STATUS,
+  describeSkuPosition,
   describeStockLine,
   detectIssues,
   makeCatalogue,
@@ -27,13 +28,11 @@ import {
 import {
   TRANSFER_STATUSES,
   allAuditCounts,
-  allIssueActions,
   allProducts,
   allStockLines,
   allTransfers,
   allWarehouses,
-  defaultIssueAction,
-  issueKey,
+  productImage,
 } from './store.js';
 
 /**
@@ -45,13 +44,12 @@ import {
  * @returns {Promise<object>}
  */
 export async function snapshot() {
-  const [products, warehouses, stockLines, transfers, auditCounts, actions] = await Promise.all([
+  const [products, warehouses, stockLines, transfers, auditCounts] = await Promise.all([
     allProducts(),
     allWarehouses(),
     allStockLines(),
     allTransfers(),
     allAuditCounts(),
-    allIssueActions(),
   ]);
 
   return {
@@ -60,7 +58,6 @@ export async function snapshot() {
     stockLines,
     transfers,
     auditCounts,
-    actions,
     catalogue: makeCatalogue(products, warehouses),
   };
 }
@@ -95,12 +92,11 @@ export async function stockReport(data) {
  * Every detected issue, with names attached, ordered so the most serious
  * problems are at the top of the list.
  *
- * Each issue also carries whatever staff have recorded against it - an action
- * status and a note. That record is looked up here, alongside the detection,
- * rather than being mixed into it: detectIssues() decides what is wrong with
- * the stock, and the action says what the team did about it. Neither can
- * silence the other, so an issue marked Resolved while the stock is still short
- * is still detected, still listed, and still counted on the dashboard.
+ * Nothing is stored here and nothing can be. Issues are recomputed from the
+ * source on every page load, so an issue cannot be dismissed, suppressed or
+ * marked away: a problem that still exists in the data is still detected, still
+ * listed, and still counted on the dashboard. The source is read-only, so there
+ * is no alert table to write to and no record of one that could go stale.
  *
  * @param {object} [data]
  * @returns {Promise<object[]>}
@@ -118,16 +114,12 @@ export async function issuesReport(data) {
   };
 
   return detectIssues(snap.stockLines, snap.catalogue)
-    .map((issue) => {
-      const key = issueKey(issue);
-      return {
-        ...issue,
-        key,
-        action: snap.actions.get(key) ?? defaultIssueAction(),
-        productName: productName(snap, issue.sku),
-        warehouseName: warehouseName(snap, issue.warehouseId),
-      };
-    })
+    .map((issue) => ({
+      ...issue,
+      key: `${issue.type}|${issue.sku}|${issue.warehouseId}`,
+      productName: productName(snap, issue.sku),
+      warehouseName: warehouseName(snap, issue.warehouseId),
+    }))
     .sort(
       (a, b) =>
         severity[a.type] - severity[b.type] ||
@@ -184,30 +176,41 @@ export async function auditReport(data) {
 /**
  * The six dashboard figures.
  *
- * The three stock figures count stock lines - one SKU at one warehouse - not
- * SKUs, because the same SKU can be healthy at one site and out of stock at
- * another. They are taken from the health band, which allows exactly one band
- * per line, so Healthy + Low + Out + Negative always equals the total number of
- * lines.
+ * ---------------------------------------------------------------------------
+ * EVERY CARD COUNTS THE SAME THING: CATALOGUE SKUs
+ *
+ * The three stock figures count SKUs, not stock lines. A SKU's band is worked
+ * out from its stock summed across every warehouse - see describeSkuPosition()
+ * in rules.js - so exactly one band applies to each SKU and
+ *
+ *   Healthy + Low + Out of Stock + Negative  ===  Total SKUs
+ *
+ * always holds. That is the invariant the last assertion on this report exists
+ * to protect, and it is the reason the cards are comparable with each other at
+ * all: six cards in two different units is not a dashboard, it is a trap.
+ *
+ * These figures used to count stock lines, which made Healthy Stock read 6,791
+ * against a catalogue of 6,510 - a number larger than the thing it was a subset
+ * of, because most SKUs carry a row at all ten warehouses.
  *
  * @param {object} [data]
  * @returns {Promise<object>}
  */
 export async function dashboardMetrics(data) {
   const snap = await use(data);
-  const lines = await stockReport(snap);
+  const products = await productsReport(snap);
   const audit = await auditReport(snap);
-  const countBand = (band) => lines.filter((line) => line.status === band).length;
+  const countBand = (band) => products.filter((product) => product.stockStatus === band).length;
 
   return {
-    totalSkus: snap.products.length,
+    totalSkus: products.length,
     healthyStock: countBand(STOCK_STATUS.HEALTHY),
     lowStock: countBand(STOCK_STATUS.LOW),
     outOfStock: countBand(STOCK_STATUS.OUT),
     negativeInventory: countBand(STOCK_STATUS.NEGATIVE),
     discrepancies: audit.filter((row) => !row.matches).length,
     pendingTransfers: snap.transfers.filter((transfer) => transfer.status === 'Pending').length,
-    totalStockLines: lines.length,
+    totalStockLines: snap.stockLines.length,
   };
 }
 
@@ -262,12 +265,33 @@ export async function transferCounts(data) {
 export async function productsReport(data) {
   const snap = await use(data);
 
-  return snap.products.map((product) => ({
-    ...product,
-    unitsHeld: snap.stockLines
-      .filter((line) => line.sku === product.sku)
-      .reduce((total, line) => total + line.onHand, 0),
-  }));
+  // Grouped in one pass over the stock lines rather than one pass per product.
+  // The catalogue is six and a half thousand SKUs against sixty-eight thousand
+  // lines; filtering the lines inside the map would be four hundred million
+  // comparisons for a screen that shows a page of rows.
+  const linesBySku = new Map();
+  for (const line of snap.stockLines) {
+    const existing = linesBySku.get(line.sku);
+    if (existing) existing.push(line);
+    else linesBySku.set(line.sku, [line]);
+  }
+
+  return snap.products.map((product) => {
+    // The SKU's position across the whole business, banded by the same rules a
+    // single stock line is. This is what the dashboard counts, so the card and
+    // the row a member of staff drills through to always agree.
+    const position = describeSkuPosition(product.sku, linesBySku.get(product.sku) ?? []);
+
+    return {
+      ...product,
+      image: productImage(product),
+      unitsHeld: position.onHand,
+      reserved: position.reserved,
+      available: position.available,
+      stockStatus: position.status,
+      warehouseCount: position.warehouseCount,
+    };
+  });
 }
 
 /**

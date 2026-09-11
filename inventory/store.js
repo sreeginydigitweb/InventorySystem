@@ -1,209 +1,166 @@
 /**
- * The store: the one place that reads and writes inventory data.
+ * The store: the one place the rest of the system asks for inventory data.
  *
- * Everything lives in PostgreSQL now, in the `inventory_control` schema of
- * varmen_db. Nothing is held in memory between requests and nothing resets on
- * restart - a product added today is still there tomorrow.
+ * It is READ-ONLY, and there is nothing in this file that could make it
+ * otherwise. `ledsone` is an existing business database that this application
+ * does not own; it reports on what is in it and never writes back. There is no
+ * add, update or delete function here any more, so no route, no form and no
+ * future edit to a screen can reach a write path - there is not one to reach.
  *
- * Four rules hold throughout, and they are why this module exists rather than
- * each route writing its own SQL:
+ * ---------------------------------------------------------------------------
+ * WHY THIS LAYER STILL EXISTS
  *
- * 1. DERIVED FIGURES ARE NEVER STORED. Available stock, the audit difference
- *    and every detected issue stay derived. There is no column for any of them,
- *    so no write path can put a saved figure at odds with the rule that
- *    produces it.
+ * source.js knows ledsone's tables. The screens, rules and reports know the
+ * shapes they were written against. This module is the seam between them, and
+ * it does two things worth having:
  *
- * 2. EVERY WRITE IS VALIDATED FIRST. Each operation returns either
- *    {ok: true, value} or {ok: false, errors} keyed by field name. Validation
- *    runs to completion before a statement is issued, so a rejected form leaves
- *    the database exactly as it was.
+ *   1. It holds the source behind useSource(), so the tests can run the whole
+ *      application - routing, reports, detection, rendering - against sample
+ *      data in memory, and never open a connection to the business database.
  *
- * 3. A WRITE THAT SPANS TABLES IS ONE TRANSACTION. Deleting a product together
- *    with the rows that point at it either all happens or none of it does.
+ *   2. It answers the small lookups (one product, one stock line, the list of
+ *      categories to offer in a filter) from the lists source.js has already
+ *      read, rather than issuing another query per page.
  *
- * 4. ONLY `inventory_control` IS TOUCHED. Every statement below is qualified
- *    with that schema. The other schemas in varmen_db belong to other
- *    applications and are never read or written.
+ * ---------------------------------------------------------------------------
+ * DERIVED FIGURES ARE STILL NEVER STORED
  *
- * The detection rules in rules.js are not touched by anything here. A stock
- * line edited through this module is examined by exactly the same six rules as
- * a seeded one.
+ * Available stock stays on_hand - reserved, the audit difference stays
+ * counted - system, and every detected issue stays recomputed from the stock.
+ * Nothing in the source is a saved copy of any of them, so none of them can
+ * drift from the figures they come from.
  */
 
-import { SCHEMA, firstRow, rows, withTransaction } from './db.js';
+import * as ledsone from './source.js';
+
+/* -------------------------------------------------------------------------- */
+/* Where the data comes from                                                  */
+/* -------------------------------------------------------------------------- */
 
 /**
- * The categories and suppliers the catalogue is allowed to use.
+ * The source the store reads. ledsone in production; a plain object of arrays
+ * in a test.
  *
- * Declared lists rather than SELECT DISTINCT over the products. Derived from
- * the data, a category would vanish from the form the moment its last product
- * was deleted and could then never be used again - so what is offered is stated
- * here, and does not depend on what happens to be in stock today.
+ * @type {{products: () => Promise<object[]>, warehouses: () => Promise<object[]>,
+ *         stockLines: () => Promise<object[]>, transfers: () => Promise<object[]>,
+ *         auditCounts: () => Promise<object[]>}}
  */
-export const CATEGORIES = Object.freeze([
-  'Ceiling Lights',
-  'Outdoor Lighting',
-  'Bulbs',
-  'Fittings & Spares',
-  'Lamps',
-]);
+let source = ledsone;
 
-/** Suppliers the catalogue is allowed to use. */
-export const SUPPLIERS = Object.freeze([
-  'Northgate Lighting Ltd',
-  'Halden Electrical Supplies',
-  'Verity Home Fittings',
-  'Mercer & Roe Components',
-]);
+/**
+ * Point the store at a different source.
+ *
+ * Exists for the test suite, which supplies sample data in memory so no test
+ * can reach the business database. Call with no argument to go back to ledsone.
+ *
+ * @param {object} [impl]
+ * @returns {void}
+ */
+export function useSource(impl) {
+  source = impl ?? ledsone;
+}
 
-/** The two listing states a product can be in, as shown on screen. */
-export const LISTING_STATUSES = Object.freeze(['Active', 'Inactive']);
+/**
+ * Build a source out of plain arrays.
+ *
+ * @param {{products?: object[], warehouses?: object[], stockLines?: object[],
+ *          transfers?: object[], auditCounts?: object[]}} data
+ * @returns {object}
+ */
+export function memorySource(data = {}) {
+  const give = (list) => async () => list ?? [];
 
-/** The three transfer statuses, in the order work moves through them. */
+  return {
+    products: give(data.products),
+    warehouses: give(data.warehouses),
+    stockLines: give(data.stockLines),
+    transfers: give(data.transfers),
+    auditCounts: give(data.auditCounts),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Vocabulary the screens offer                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The three transfer statuses, in the order work moves through them.
+ *
+ * Declared rather than derived: the Transfers screen's filter must offer all
+ * three, and the dashboard's summary must list all three with a count, whether
+ * or not the source currently holds a transfer at each - or, as today, any
+ * transfer at all.
+ */
 export const TRANSFER_STATUSES = Object.freeze(['Pending', 'In Transit', 'Received']);
 
 /**
- * The action states staff can put a detected issue into.
+ * Categories to offer in the Products filter.
  *
- * These describe what staff have DONE about a problem. They never describe
- * whether the problem exists - that stays the job of the detection rules.
+ * Derived from the catalogue rather than declared. The old declared list was
+ * five invented categories; the source has a real one - the product_type its
+ * Shopify listings carry - and the only honest list of them is the set actually
+ * present. A SKU with no listing has no category and is simply absent from
+ * every category-filtered view, which is what "not in the source" should look
+ * like.
+ *
+ * @returns {Promise<string[]>}
  */
-export const ACTION_STATUSES = Object.freeze(['Open', 'In Progress', 'Resolved']);
+export async function categories() {
+  return distinct(await allProducts(), 'category');
+}
 
-/** The state a detected issue is in until somebody records otherwise. */
-export const DEFAULT_ACTION_STATUS = 'Open';
+/**
+ * Suppliers to offer in the Products filter, from the same real data.
+ *
+ * @returns {Promise<string[]>}
+ */
+export async function suppliers() {
+  return distinct(await allProducts(), 'supplier');
+}
 
-/** Longest action note accepted, matching the CHECK constraint on the column. */
-export const MAX_NOTE_LENGTH = 500;
+/**
+ * The sorted set of non-empty values a field takes across the catalogue.
+ *
+ * @param {readonly object[]} list
+ * @param {string} field
+ * @returns {string[]}
+ */
+function distinct(list, field) {
+  const values = new Set();
+  for (const item of list) {
+    if (item[field]) values.add(item[field]);
+  }
+  return [...values].sort((a, b) => a.localeCompare(b));
+}
 
 /* -------------------------------------------------------------------------- */
 /* Small shared helpers                                                       */
 /* -------------------------------------------------------------------------- */
 
-/** A rejected write. */
-const fail = (errors) => ({ ok: false, errors });
-
-/** An accepted write. */
-const done = (value) => ({ ok: true, value });
-
-/** Trim a submitted value without caring whether it arrived at all. */
-function text(value) {
-  return String(value ?? '').trim();
-}
-
-/**
- * Read a whole number from a form field.
- *
- * Returns null when the field is not a whole number, so the caller can say
- * which field was wrong rather than silently storing NaN.
- *
- * @param {unknown} value
- * @returns {number|null}
- */
-export function wholeNumber(value) {
-  const raw = text(value);
-  if (raw === '') return null;
-  if (!/^-?\d+$/.test(raw)) return null;
-  return Number(raw);
-}
-
-/** Today, as the ISO date the data uses. */
-export function today() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-/** Whether a string is an ISO calendar date the system will accept. */
-function isIsoDate(value) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const parsed = new Date(`${value}T00:00:00Z`);
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
-}
-
 /**
  * Thumbnail path for a SKU.
  *
- * Generated by the server rather than stored, so the repository carries no
- * binary assets and the page never reaches out to the network. A product may
- * override it with its own image_path.
+ * Drawn by the server from the SKU itself, and used only when the source holds
+ * no photograph for the product. It is not a picture of the product and does
+ * not pretend to be one - it is initials on a coloured square, so a row without
+ * an image still lines up with the rows that have one.
  *
  * @param {string} sku
  * @returns {string}
  */
 export function imagePathFor(sku) {
-  return `/images/${sku}.svg`;
+  return `/images/${encodeURIComponent(sku)}.svg`;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Row shapes                                                                 */
-/* -------------------------------------------------------------------------- */
-
-/*
- * The screens were written against a particular shape - sku, warehouseId,
- * onHand, unitsSoldLast90Days - and that shape is kept exactly. These five
- * functions are the only place the database's snake_case meets the
- * application's camelCase, so a column rename cannot leak into the rendering.
+/**
+ * The image to show for a product: the real one, or the drawn fallback.
+ *
+ * @param {{sku: string, image: string|null}} product
+ * @returns {string}
  */
-
-const toProduct = (row) =>
-  row === null
-    ? null
-    : Object.freeze({
-        sku: row.sku,
-        name: row.name,
-        image: row.image_path ?? imagePathFor(row.sku),
-        category: row.category,
-        supplier: row.supplier,
-        active: row.active,
-        unitsSoldLast90Days: row.units_sold_last_90_days,
-        approvedWarehouses: Object.freeze(row.approved_warehouses ?? []),
-      });
-
-const toWarehouse = (row) =>
-  row === null ? null : Object.freeze({ id: row.id, name: row.name, location: row.location });
-
-const toStockLine = (row) =>
-  row === null
-    ? null
-    : Object.freeze({
-        sku: row.sku,
-        warehouseId: row.warehouse_id,
-        onHand: row.on_hand,
-        reserved: row.reserved,
-        minimum: row.minimum,
-      });
-
-const toTransfer = (row) =>
-  row === null
-    ? null
-    : Object.freeze({
-        id: row.id,
-        sku: row.sku,
-        fromWarehouseId: row.from_warehouse_id,
-        toWarehouseId: row.to_warehouse_id,
-        quantity: row.quantity,
-        status: row.status,
-        raisedOn: row.raised_on,
-      });
-
-const toAuditCount = (row) =>
-  row === null
-    ? null
-    : Object.freeze({
-        id: row.id,
-        sku: row.sku,
-        warehouseId: row.warehouse_id,
-        systemQuantity: row.system_quantity,
-        countedQuantity: row.counted_quantity,
-        countedOn: row.counted_on,
-        countedBy: row.counted_by,
-      });
-
-/** Products with their approved-warehouse list gathered in the same query. */
-const PRODUCT_SELECT = `
-  SELECT p.*, coalesce(array_agg(pw.warehouse_id ORDER BY pw.warehouse_id)
-                       FILTER (WHERE pw.warehouse_id IS NOT NULL), '{}') AS approved_warehouses
-    FROM ${SCHEMA}.products p
-    LEFT JOIN ${SCHEMA}.product_warehouses pw ON pw.sku = p.sku`;
+export function productImage(product) {
+  return product.image ?? imagePathFor(product.sku);
+}
 
 /* -------------------------------------------------------------------------- */
 /* Reads                                                                      */
@@ -215,7 +172,7 @@ const PRODUCT_SELECT = `
  * @returns {Promise<object[]>}
  */
 export async function allProducts() {
-  return (await rows(`${PRODUCT_SELECT} GROUP BY p.sku ORDER BY p.sku`)).map(toProduct);
+  return source.products();
 }
 
 /**
@@ -228,7 +185,7 @@ export async function allProducts() {
  * @returns {Promise<object|null>}
  */
 export async function findProduct(sku) {
-  return toProduct(await firstRow(`${PRODUCT_SELECT} WHERE p.sku = $1 GROUP BY p.sku`, [sku]));
+  return (await allProducts()).find((product) => product.sku === sku) ?? null;
 }
 
 /**
@@ -237,7 +194,7 @@ export async function findProduct(sku) {
  * @returns {Promise<object[]>}
  */
 export async function allWarehouses() {
-  return (await rows(`SELECT * FROM ${SCHEMA}.warehouses ORDER BY id`)).map(toWarehouse);
+  return source.warehouses();
 }
 
 /**
@@ -247,7 +204,7 @@ export async function allWarehouses() {
  * @returns {Promise<object|null>}
  */
 export async function findWarehouse(id) {
-  return toWarehouse(await firstRow(`SELECT * FROM ${SCHEMA}.warehouses WHERE id = $1`, [id]));
+  return (await allWarehouses()).find((warehouse) => warehouse.id === id) ?? null;
 }
 
 /**
@@ -256,37 +213,31 @@ export async function findWarehouse(id) {
  * @returns {Promise<object[]>}
  */
 export async function allStockLines() {
-  return (await rows(`SELECT * FROM ${SCHEMA}.stock_lines ORDER BY sku, warehouse_id`)).map(
-    toStockLine,
-  );
+  return source.stockLines();
 }
 
 /**
  * One stock line, addressed by the pair that identifies it.
- *
- * A SKU is held at a warehouse once. That pair is the primary key, and
- * addStockLine refuses to create a second line for it, so it stays one.
  *
  * @param {string} sku
  * @param {string} warehouseId
  * @returns {Promise<object|null>}
  */
 export async function findStockLine(sku, warehouseId) {
-  return toStockLine(
-    await firstRow(`SELECT * FROM ${SCHEMA}.stock_lines WHERE sku = $1 AND warehouse_id = $2`, [
-      sku,
-      warehouseId,
-    ]),
+  return (
+    (await allStockLines()).find(
+      (line) => line.sku === sku && line.warehouseId === warehouseId,
+    ) ?? null
   );
 }
 
 /**
- * Every transfer.
+ * Every transfer the source holds.
  *
  * @returns {Promise<object[]>}
  */
 export async function allTransfers() {
-  return (await rows(`SELECT * FROM ${SCHEMA}.transfers ORDER BY id`)).map(toTransfer);
+  return source.transfers();
 }
 
 /**
@@ -296,785 +247,24 @@ export async function allTransfers() {
  * @returns {Promise<object|null>}
  */
 export async function findTransfer(id) {
-  return toTransfer(await firstRow(`SELECT * FROM ${SCHEMA}.transfers WHERE id = $1`, [id]));
+  return (await allTransfers()).find((transfer) => transfer.id === id) ?? null;
 }
 
 /**
- * Every audit count.
+ * Every physical stock count the source holds.
  *
  * @returns {Promise<object[]>}
  */
 export async function allAuditCounts() {
-  return (await rows(`SELECT * FROM ${SCHEMA}.audit_counts ORDER BY id`)).map(toAuditCount);
+  return source.auditCounts();
 }
 
 /**
- * One audit count, by identifier.
+ * One stock count, by identifier.
  *
  * @param {string} id
  * @returns {Promise<object|null>}
  */
 export async function findAuditCount(id) {
-  return toAuditCount(await firstRow(`SELECT * FROM ${SCHEMA}.audit_counts WHERE id = $1`, [id]));
-}
-
-/**
- * Everything that points at a SKU, so a delete can say what it would break.
- *
- * @param {string} sku
- * @returns {Promise<{stockLines: number, transfers: number, auditCounts: number, total: number}>}
- */
-export async function referencesTo(sku) {
-  const counts = await firstRow(
-    `SELECT (SELECT count(*)::int FROM ${SCHEMA}.stock_lines  WHERE sku = $1) AS stock_lines,
-            (SELECT count(*)::int FROM ${SCHEMA}.transfers    WHERE sku = $1) AS transfers,
-            (SELECT count(*)::int FROM ${SCHEMA}.audit_counts WHERE sku = $1) AS audit_counts`,
-    [sku],
-  );
-
-  return {
-    stockLines: counts.stock_lines,
-    transfers: counts.transfers,
-    auditCounts: counts.audit_counts,
-    total: counts.stock_lines + counts.transfers + counts.audit_counts,
-  };
-}
-
-/**
- * The next identifier in a series, one past the highest already in use.
- *
- * @param {string} table
- * @param {string} prefix
- * @returns {Promise<string>}
- */
-async function nextId(table, prefix) {
-  const row = await firstRow(
-    `SELECT coalesce(max(substring(id from '^${prefix}(\\d+)$')::int), 1000) AS highest
-       FROM ${SCHEMA}.${table}`,
-  );
-  return `${prefix}${row.highest + 1}`;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Products                                                                   */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Check the fields a product form submits.
- *
- * @param {object} input
- * @param {string|null} existingSku SKU being edited, so it can keep its own.
- * @returns {Promise<object>} Errors by field name. Empty when the form is good.
- */
-async function validateProduct(input, existingSku = null) {
-  const errors = {};
-  const sku = text(input.sku);
-  const name = text(input.name);
-  const category = text(input.category);
-  const supplier = text(input.supplier);
-  const listing = text(input.listing);
-  const sold = text(input.unitsSoldLast90Days);
-
-  if (!sku) {
-    errors.sku = 'A SKU is required.';
-  } else if (!/^[A-Za-z0-9][A-Za-z0-9._-]{1,31}$/.test(sku)) {
-    errors.sku = 'Use 2 to 32 letters, digits, dot, dash or underscore.';
-  } else {
-    // Case-insensitive, so SIC-1001 and sic-1001 cannot both exist and leave
-    // staff unable to tell two rows apart. The unique index enforces it too.
-    const clash = await firstRow(
-      `SELECT sku FROM ${SCHEMA}.products WHERE lower(sku) = lower($1) AND sku <> coalesce($2, '')`,
-      [sku, existingSku],
-    );
-    if (clash) errors.sku = `SKU ${sku} is already in the catalogue.`;
-  }
-
-  if (!name) errors.name = 'A product name is required.';
-  else if (name.length > 120) errors.name = 'Keep the name to 120 characters or fewer.';
-
-  if (!category) errors.category = 'A category is required.';
-  else if (!CATEGORIES.includes(category)) errors.category = 'Choose one of the listed categories.';
-
-  if (!supplier) errors.supplier = 'A supplier is required.';
-  else if (!SUPPLIERS.includes(supplier)) errors.supplier = 'Choose one of the listed suppliers.';
-
-  if (!listing) errors.listing = 'A listing status is required.';
-  else if (!LISTING_STATUSES.includes(listing)) {
-    errors.listing = `Listing status must be ${LISTING_STATUSES.join(' or ')}.`;
-  }
-
-  if (sold !== '') {
-    const units = wholeNumber(sold);
-    if (units === null || units < 0) {
-      errors.unitsSoldLast90Days = 'Units sold must be a whole number of zero or more.';
-    }
-  }
-
-  return errors;
-}
-
-/**
- * Approved warehouses from a form, keeping only real ones.
- *
- * @param {unknown} value One id, or several.
- * @returns {Promise<string[]>}
- */
-async function approvedWarehousesFrom(value) {
-  const submitted = (Array.isArray(value) ? value : [value]).map((entry) => text(entry));
-  const warehouses = await allWarehouses();
-  return warehouses.map((warehouse) => warehouse.id).filter((id) => submitted.includes(id));
-}
-
-/** Replace a product's approved-warehouse list, inside an open transaction. */
-async function writeApprovedWarehouses(client, sku, warehouseIds) {
-  await client.query(`DELETE FROM ${SCHEMA}.product_warehouses WHERE sku = $1`, [sku]);
-
-  if (warehouseIds.length > 0) {
-    await client.query(
-      `INSERT INTO ${SCHEMA}.product_warehouses (sku, warehouse_id)
-       SELECT $1, unnest($2::text[])`,
-      [sku, warehouseIds],
-    );
-  }
-}
-
-/**
- * Add a product to the catalogue.
- *
- * @param {object} input Raw form fields.
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function addProduct(input) {
-  const errors = await validateProduct(input);
-  if (Object.keys(errors).length > 0) return fail(errors);
-
-  const sku = text(input.sku);
-  const approved = await approvedWarehousesFrom(input.approvedWarehouses);
-
-  await withTransaction(async (client) => {
-    await client.query(
-      `INSERT INTO ${SCHEMA}.products
-         (sku, name, category, supplier, active, units_sold_last_90_days)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        sku,
-        text(input.name),
-        text(input.category),
-        text(input.supplier),
-        text(input.listing) === 'Active',
-        wholeNumber(input.unitsSoldLast90Days) ?? 0,
-      ],
-    );
-    await writeApprovedWarehouses(client, sku, approved);
-  });
-
-  return done(await findProduct(sku));
-}
-
-/**
- * Update a product.
- *
- * The SKU is the key stock lines, transfers and audit counts point at, so it is
- * not editable: changing it would orphan those records, which is exactly what
- * this system is meant to avoid. Staff delete and re-add instead.
- *
- * @param {string} sku
- * @param {object} input
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function updateProduct(sku, input) {
-  const existing = await findProduct(sku);
-  if (!existing) return fail({ sku: `No product with SKU ${sku}.` });
-
-  const errors = await validateProduct({ ...input, sku }, sku);
-  if (Object.keys(errors).length > 0) return fail(errors);
-
-  const approved = await approvedWarehousesFrom(input.approvedWarehouses);
-
-  await withTransaction(async (client) => {
-    await client.query(
-      `UPDATE ${SCHEMA}.products
-          SET name = $2, category = $3, supplier = $4, active = $5,
-              units_sold_last_90_days = $6, updated_at = now()
-        WHERE sku = $1`,
-      [
-        sku,
-        text(input.name),
-        text(input.category),
-        text(input.supplier),
-        text(input.listing) === 'Active',
-        wholeNumber(input.unitsSoldLast90Days) ?? existing.unitsSoldLast90Days,
-      ],
-    );
-    await writeApprovedWarehouses(client, sku, approved);
-  });
-
-  return done(await findProduct(sku));
-}
-
-/**
- * Delete a product.
- *
- * A product nothing points at is removed outright. A product that stock lines,
- * transfers or audit counts still reference is refused, because removing it
- * would leave those pointing at a SKU that no longer exists. Staff can say so
- * explicitly with cascade, which removes the dependants in the same
- * transaction.
- *
- * @param {string} sku
- * @param {{cascade?: boolean}} [options]
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function deleteProduct(sku, { cascade = false } = {}) {
-  const product = await findProduct(sku);
-  if (!product) return fail({ sku: `No product with SKU ${sku}.` });
-
-  const references = await referencesTo(sku);
-  if (references.total > 0 && !cascade) {
-    return fail({
-      cascade:
-        `${sku} is still referenced by ${references.stockLines} stock line(s), ` +
-        `${references.transfers} transfer(s) and ${references.auditCounts} audit ` +
-        'record(s). Confirm that those should be removed too, or remove them first.',
-    });
-  }
-
-  await withTransaction(async (client) => {
-    // Stock lines carry no foreign key - a stock line is allowed to name a SKU
-    // that is not in the catalogue, because that is a condition the rules
-    // report - so they are removed here rather than by a cascade.
-    await client.query(`DELETE FROM ${SCHEMA}.stock_lines WHERE sku = $1`, [sku]);
-    await client.query(`DELETE FROM ${SCHEMA}.alert_actions WHERE sku = $1`, [sku]);
-    // transfers and audit_counts cascade from the product row itself.
-    await client.query(`DELETE FROM ${SCHEMA}.products WHERE sku = $1`, [sku]);
-  });
-
-  return done({ ...product, cascaded: references });
-}
-
-/* -------------------------------------------------------------------------- */
-/* Warehouse stock                                                            */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Check the fields a stock form submits.
- *
- * Available is not among them and never will be: it is on hand minus reserved,
- * worked out by rules.js, so there is no field here for it to disagree with.
- *
- * Two combinations that look wrong are allowed on purpose, because the
- * detection rules exist to report them:
- *
- *   on hand below zero      reported as Negative Inventory
- *   reserved above on hand  reported as Out of Stock (over-reserved)
- *
- * Rejecting those on the form would make the conditions unreachable and quietly
- * disable two of the six rules.
- *
- * @param {object} input
- * @param {{sku: string, warehouseId: string}|null} existing Line being edited.
- * @returns {Promise<object>} Errors by field name.
- */
-async function validateStockLine(input, existing = null) {
-  const errors = {};
-  const sku = text(input.sku);
-  const warehouseId = text(input.warehouseId);
-
-  if (!sku) errors.sku = 'A SKU is required.';
-  else if (!(await findProduct(sku))) errors.sku = `SKU ${sku} is not in the product catalogue.`;
-
-  const warehouse = warehouseId ? await findWarehouse(warehouseId) : null;
-  if (!warehouseId) errors.warehouseId = 'A warehouse is required.';
-  else if (!warehouse) {
-    errors.warehouseId = `Warehouse ${warehouseId} is not a recognised warehouse.`;
-  }
-
-  if (!errors.sku && !errors.warehouseId) {
-    const isSelf =
-      existing !== null && existing.sku === sku && existing.warehouseId === warehouseId;
-    if (!isSelf && (await findStockLine(sku, warehouseId))) {
-      errors.sku = `${sku} already has a stock line at ${warehouse.name}. Edit that line instead.`;
-    }
-  }
-
-  const onHand = wholeNumber(input.onHand);
-  if (onHand === null) errors.onHand = 'On hand must be a whole number.';
-
-  const reserved = wholeNumber(input.reserved);
-  if (reserved === null) errors.reserved = 'Reserved must be a whole number.';
-  else if (reserved < 0) errors.reserved = 'Reserved cannot be below zero.';
-
-  const minimum = wholeNumber(input.minimum);
-  if (minimum === null) errors.minimum = 'Minimum stock must be a whole number.';
-  else if (minimum < 0) errors.minimum = 'Minimum stock cannot be below zero.';
-
-  return errors;
-}
-
-/**
- * Add a warehouse stock line.
- *
- * @param {object} input
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function addStockLine(input) {
-  const errors = await validateStockLine(input);
-  if (Object.keys(errors).length > 0) return fail(errors);
-
-  await rows(
-    `INSERT INTO ${SCHEMA}.stock_lines (sku, warehouse_id, on_hand, reserved, minimum)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [
-      text(input.sku),
-      text(input.warehouseId),
-      wholeNumber(input.onHand),
-      wholeNumber(input.reserved),
-      wholeNumber(input.minimum),
-    ],
-  );
-
-  return done(await findStockLine(text(input.sku), text(input.warehouseId)));
-}
-
-/**
- * Update a stock line, including moving it to another SKU or warehouse.
- *
- * @param {string} sku          SKU of the line being edited.
- * @param {string} warehouseId  Warehouse of the line being edited.
- * @param {object} input
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function updateStockLine(sku, warehouseId, input) {
-  if (!(await findStockLine(sku, warehouseId))) {
-    return fail({ sku: `No stock line for ${sku} at ${warehouseId}.` });
-  }
-
-  const errors = await validateStockLine(input, { sku, warehouseId });
-  if (Object.keys(errors).length > 0) return fail(errors);
-
-  await rows(
-    `UPDATE ${SCHEMA}.stock_lines
-        SET sku = $3, warehouse_id = $4, on_hand = $5, reserved = $6, minimum = $7,
-            updated_at = now()
-      WHERE sku = $1 AND warehouse_id = $2`,
-    [
-      sku,
-      warehouseId,
-      text(input.sku),
-      text(input.warehouseId),
-      wholeNumber(input.onHand),
-      wholeNumber(input.reserved),
-      wholeNumber(input.minimum),
-    ],
-  );
-
-  return done(await findStockLine(text(input.sku), text(input.warehouseId)));
-}
-
-/**
- * Delete a stock line.
- *
- * @param {string} sku
- * @param {string} warehouseId
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function deleteStockLine(sku, warehouseId) {
-  const line = await findStockLine(sku, warehouseId);
-  if (!line) return fail({ sku: `No stock line for ${sku} at ${warehouseId}.` });
-
-  await withTransaction(async (client) => {
-    await client.query(`DELETE FROM ${SCHEMA}.stock_lines WHERE sku = $1 AND warehouse_id = $2`, [
-      sku,
-      warehouseId,
-    ]);
-    // Whatever the rules were saying about this line, they are no longer saying
-    // it, so the notes staff left against those issues go with it.
-    await client.query(`DELETE FROM ${SCHEMA}.alert_actions WHERE sku = $1 AND warehouse_id = $2`, [
-      sku,
-      warehouseId,
-    ]);
-  });
-
-  return done(line);
-}
-
-/* -------------------------------------------------------------------------- */
-/* Issue actions                                                              */
-/* -------------------------------------------------------------------------- */
-
-/**
- * The key one detected issue is filed under.
- *
- * An issue has no stored identity - it is recomputed from the stock data on
- * every page load - so its identity comes from what it is about: the problem,
- * the SKU and the site. In the database that is the composite primary key of
- * alert_actions; in the application it is this string, used by the screens.
- *
- * @param {{type: string, sku: string, warehouseId: string}} issue
- * @returns {string}
- */
-export function issueKey(issue) {
-  return [issue.type, issue.sku, issue.warehouseId].join(' ');
-}
-
-/** The state an issue is in when nothing has been recorded against it. */
-const NO_ACTION = Object.freeze({ status: DEFAULT_ACTION_STATUS, note: '', updatedAt: null });
-
-/** The default action, for an issue nobody has recorded anything against. */
-export const defaultIssueAction = () => NO_ACTION;
-
-/**
- * What staff have recorded against an issue, or the default if nothing yet.
- *
- * @param {{type: string, sku: string, warehouseId: string}} issue
- * @returns {Promise<{status: string, note: string, updatedAt: string|null}>}
- */
-export async function issueAction(issue) {
-  const row = await firstRow(
-    `SELECT status, note, to_char(updated_at, 'YYYY-MM-DD HH24:MI') AS updated_at
-       FROM ${SCHEMA}.alert_actions
-      WHERE issue_type = $1 AND sku = $2 AND warehouse_id = $3`,
-    [issue.type, issue.sku, issue.warehouseId],
-  );
-
-  return row === null
-    ? NO_ACTION
-    : Object.freeze({ status: row.status, note: row.note, updatedAt: row.updated_at });
-}
-
-/**
- * Every recorded action, keyed by issueKey(), in one query.
- *
- * The alerts screen needs the action for each of twenty-odd issues; fetching
- * them one at a time would be twenty round trips for one page.
- *
- * @returns {Promise<Map<string, object>>}
- */
-export async function allIssueActions() {
-  const found = await rows(
-    `SELECT issue_type, sku, warehouse_id, status, note,
-            to_char(updated_at, 'YYYY-MM-DD HH24:MI') AS updated_at
-       FROM ${SCHEMA}.alert_actions`,
-  );
-
-  return new Map(
-    found.map((row) => [
-      issueKey({ type: row.issue_type, sku: row.sku, warehouseId: row.warehouse_id }),
-      Object.freeze({ status: row.status, note: row.note, updatedAt: row.updated_at }),
-    ]),
-  );
-}
-
-/**
- * Record what staff did about an issue.
- *
- * This writes nothing to the stock data, which is the whole point. Marking a
- * problem Resolved says the team has dealt with it; it does not say the stock
- * is now correct. If the shortage is still there the next page load detects it
- * again, exactly as before, and the issue is still listed - carrying the note
- * and the status alongside it.
- *
- * The only way to make an issue go away is to fix the stock figures it is
- * derived from.
- *
- * @param {{type: string, sku: string, warehouseId: string}} issue
- * @param {{status?: string, note?: string}} input
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function recordIssueAction(issue, input) {
-  const errors = {};
-  const status = text(input.status) || DEFAULT_ACTION_STATUS;
-  const note = text(input.note);
-
-  if (!ACTION_STATUSES.includes(status)) {
-    errors.status = `Action status must be one of ${ACTION_STATUSES.join(', ')}.`;
-  }
-  if (note.length > MAX_NOTE_LENGTH) {
-    errors.note = `Keep the note to ${MAX_NOTE_LENGTH} characters or fewer.`;
-  }
-  if (Object.keys(errors).length > 0) return fail(errors);
-
-  await rows(
-    `INSERT INTO ${SCHEMA}.alert_actions (issue_type, sku, warehouse_id, status, note, updated_at)
-     VALUES ($1, $2, $3, $4, $5, now())
-     ON CONFLICT (issue_type, sku, warehouse_id)
-     DO UPDATE SET status = excluded.status, note = excluded.note, updated_at = now()`,
-    [issue.type, issue.sku, issue.warehouseId, status, note],
-  );
-
-  return done(await issueAction(issue));
-}
-
-/* -------------------------------------------------------------------------- */
-/* Transfers                                                                  */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Check the fields a transfer form submits.
- *
- * @param {object} input
- * @returns {Promise<object>} Errors by field name.
- */
-async function validateTransfer(input) {
-  const errors = {};
-  const sku = text(input.sku);
-  const from = text(input.fromWarehouseId);
-  const to = text(input.toWarehouseId);
-  const status = text(input.status);
-  const raisedOn = text(input.raisedOn);
-
-  if (!sku) errors.sku = 'A SKU is required.';
-  else if (!(await findProduct(sku))) errors.sku = `SKU ${sku} is not in the product catalogue.`;
-
-  if (!from) errors.fromWarehouseId = 'A source warehouse is required.';
-  else if (!(await findWarehouse(from))) {
-    errors.fromWarehouseId = `Warehouse ${from} is not a recognised warehouse.`;
-  }
-
-  if (!to) errors.toWarehouseId = 'A destination warehouse is required.';
-  else if (!(await findWarehouse(to))) {
-    errors.toWarehouseId = `Warehouse ${to} is not a recognised warehouse.`;
-  }
-
-  if (!errors.fromWarehouseId && !errors.toWarehouseId && from === to) {
-    errors.toWarehouseId = 'A transfer must move stock between two different warehouses.';
-  }
-
-  const quantity = wholeNumber(input.quantity);
-  if (quantity === null) errors.quantity = 'Quantity must be a whole number.';
-  else if (quantity <= 0) errors.quantity = 'Quantity must be greater than zero.';
-
-  if (!status) errors.status = 'A status is required.';
-  else if (!TRANSFER_STATUSES.includes(status)) {
-    errors.status = `Status must be one of ${TRANSFER_STATUSES.join(', ')}.`;
-  }
-
-  if (raisedOn && !isIsoDate(raisedOn)) {
-    errors.raisedOn = 'Use a real date in the form YYYY-MM-DD.';
-  }
-
-  return errors;
-}
-
-/**
- * Raise a transfer.
- *
- * A transfer is a record only: no stock line is touched here, and raising or
- * receiving one moves nothing.
- *
- * @param {object} input
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function addTransfer(input) {
-  const errors = await validateTransfer(input);
-  if (Object.keys(errors).length > 0) return fail(errors);
-
-  const id = await nextId('transfers', 'TR-');
-
-  await rows(
-    `INSERT INTO ${SCHEMA}.transfers
-       (id, sku, from_warehouse_id, to_warehouse_id, quantity, status, raised_on)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [
-      id,
-      text(input.sku),
-      text(input.fromWarehouseId),
-      text(input.toWarehouseId),
-      wholeNumber(input.quantity),
-      text(input.status),
-      text(input.raisedOn) || today(),
-    ],
-  );
-
-  return done(await findTransfer(id));
-}
-
-/**
- * Update a transfer, including its status.
- *
- * @param {string} id
- * @param {object} input
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function updateTransfer(id, input) {
-  const existing = await findTransfer(id);
-  if (!existing) return fail({ id: `No transfer with id ${id}.` });
-
-  const errors = await validateTransfer(input);
-  if (Object.keys(errors).length > 0) return fail(errors);
-
-  await rows(
-    `UPDATE ${SCHEMA}.transfers
-        SET sku = $2, from_warehouse_id = $3, to_warehouse_id = $4, quantity = $5,
-            status = $6, raised_on = $7, updated_at = now()
-      WHERE id = $1`,
-    [
-      id,
-      text(input.sku),
-      text(input.fromWarehouseId),
-      text(input.toWarehouseId),
-      wholeNumber(input.quantity),
-      text(input.status),
-      text(input.raisedOn) || existing.raisedOn,
-    ],
-  );
-
-  return done(await findTransfer(id));
-}
-
-/**
- * Delete a transfer.
- *
- * @param {string} id
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function deleteTransfer(id) {
-  const transfer = await findTransfer(id);
-  if (!transfer) return fail({ id: `No transfer with id ${id}.` });
-
-  await rows(`DELETE FROM ${SCHEMA}.transfers WHERE id = $1`, [id]);
-  return done(transfer);
-}
-
-/* -------------------------------------------------------------------------- */
-/* Inventory audit                                                            */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Check the fields an audit form submits.
- *
- * There is no difference field. Difference is counted minus system, worked out
- * in reports.js, so a stored difference cannot contradict the two figures it
- * comes from.
- *
- * @param {object} input
- * @returns {Promise<object>} Errors by field name.
- */
-async function validateAuditCount(input) {
-  const errors = {};
-  const sku = text(input.sku);
-  const warehouseId = text(input.warehouseId);
-  const countedBy = text(input.countedBy);
-  const countedOn = text(input.countedOn);
-
-  if (!sku) errors.sku = 'A SKU is required.';
-  else if (!(await findProduct(sku))) errors.sku = `SKU ${sku} is not in the product catalogue.`;
-
-  if (!warehouseId) errors.warehouseId = 'A warehouse is required.';
-  else if (!(await findWarehouse(warehouseId))) {
-    errors.warehouseId = `Warehouse ${warehouseId} is not a recognised warehouse.`;
-  }
-
-  const systemQuantity = wholeNumber(input.systemQuantity);
-  if (systemQuantity === null) {
-    errors.systemQuantity = 'System quantity must be a whole number.';
-  }
-
-  const countedQuantity = wholeNumber(input.countedQuantity);
-  if (countedQuantity === null) {
-    errors.countedQuantity = 'Counted quantity must be a whole number.';
-  } else if (countedQuantity < 0) {
-    // The system figure can be negative - that is a known fault the rules
-    // report. A physical count cannot be: nobody counts minus six off a shelf.
-    errors.countedQuantity = 'A physical count cannot be below zero.';
-  }
-
-  if (!countedBy) errors.countedBy = 'Say who took the count.';
-  else if (countedBy.length > 40) errors.countedBy = 'Keep this to 40 characters or fewer.';
-
-  if (countedOn && !isIsoDate(countedOn)) {
-    errors.countedOn = 'Use a real date in the form YYYY-MM-DD.';
-  }
-
-  return errors;
-}
-
-/**
- * Record a physical count.
- *
- * @param {object} input
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function addAuditCount(input) {
-  const errors = await validateAuditCount(input);
-  if (Object.keys(errors).length > 0) return fail(errors);
-
-  const id = await nextId('audit_counts', 'AC-');
-
-  await rows(
-    `INSERT INTO ${SCHEMA}.audit_counts
-       (id, sku, warehouse_id, system_quantity, counted_quantity, counted_on, counted_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [
-      id,
-      text(input.sku),
-      text(input.warehouseId),
-      wholeNumber(input.systemQuantity),
-      wholeNumber(input.countedQuantity),
-      text(input.countedOn) || today(),
-      text(input.countedBy),
-    ],
-  );
-
-  return done(await findAuditCount(id));
-}
-
-/**
- * Update a count. The difference is re-derived from the new figures wherever it
- * is displayed; nothing recalculates because nothing was stored.
- *
- * @param {string} id
- * @param {object} input
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function updateAuditCount(id, input) {
-  const existing = await findAuditCount(id);
-  if (!existing) return fail({ id: `No audit record with id ${id}.` });
-
-  const errors = await validateAuditCount(input);
-  if (Object.keys(errors).length > 0) return fail(errors);
-
-  await rows(
-    `UPDATE ${SCHEMA}.audit_counts
-        SET sku = $2, warehouse_id = $3, system_quantity = $4, counted_quantity = $5,
-            counted_on = $6, counted_by = $7, updated_at = now()
-      WHERE id = $1`,
-    [
-      id,
-      text(input.sku),
-      text(input.warehouseId),
-      wholeNumber(input.systemQuantity),
-      wholeNumber(input.countedQuantity),
-      text(input.countedOn) || existing.countedOn,
-      text(input.countedBy),
-    ],
-  );
-
-  return done(await findAuditCount(id));
-}
-
-/**
- * Delete an audit count.
- *
- * @param {string} id
- * @returns {Promise<{ok: true, value: object}|{ok: false, errors: object}>}
- */
-export async function deleteAuditCount(id) {
-  const count = await findAuditCount(id);
-  if (!count) return fail({ id: `No audit record with id ${id}.` });
-
-  await rows(`DELETE FROM ${SCHEMA}.audit_counts WHERE id = $1`, [id]);
-  return done(count);
-}
-
-/**
- * What the system currently believes is on hand for a SKU at a warehouse, used
- * to prefill a new count rather than making staff look it up.
- *
- * @param {string} sku
- * @param {string} warehouseId
- * @returns {Promise<number|null>} Null when no stock line exists for that pair.
- */
-export async function systemQuantityFor(sku, warehouseId) {
-  return (await findStockLine(sku, warehouseId))?.onHand ?? null;
+  return (await allAuditCounts()).find((count) => count.id === id) ?? null;
 }

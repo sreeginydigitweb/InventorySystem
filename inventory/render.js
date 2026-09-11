@@ -8,8 +8,8 @@
  * Two rules hold throughout:
  *
  * 1. Every dynamic value goes through escapeHtml before it reaches the page.
- *    The dummy data is ours, but the rule is absolute so it cannot lapse when a
- *    real source is connected later.
+ *    The data comes from PostgreSQL, so the rule is not optional: anything a
+ *    member of staff can type is escaped before it reaches a page.
  *
  * 2. There is exactly one script in the system, and it does one thing.
  *    /filters.js submits a list screen's filter bar when one of its controls
@@ -23,6 +23,16 @@
 
 /** Shown wherever a value is absent. */
 export const UNKNOWN_LABEL = 'Unknown';
+
+/**
+ * Shown wherever the SOURCE DATABASE has no value for a field.
+ *
+ * Deliberately different from UNKNOWN_LABEL, and deliberately not a blank cell
+ * or a zero. "Not recorded" says the business has not captured this, which is
+ * the true answer for a SKU with no listing, no purchase order or no sales -
+ * and it can never be mistaken for a figure.
+ */
+export const NOT_IN_SOURCE = 'Not recorded';
 
 const ESCAPES = {
   '&': '&amp;',
@@ -41,6 +51,20 @@ const ESCAPES = {
  * @param {unknown} value
  * @returns {string}
  */
+/**
+ * The View icon used in every Action column.
+ *
+ * Inline SVG rather than an image or a font: the page loads nothing external,
+ * the icon inherits the link colour in both the light and the dark parts of the
+ * stylesheet, and it stays sharp at any zoom. aria-hidden because the link
+ * around it already carries the label for a screen reader.
+ */
+const ICON_VIEW =
+  '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false" ' +
+  'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z"/>' +
+  '<circle cx="12" cy="12" r="3"/></svg>';
+
 export function escapeHtml(value) {
   if (value === null || value === undefined) {
     return '';
@@ -119,29 +143,6 @@ export function issueClass(type) {
 }
 
 /**
- * CSS class for what staff have recorded against an issue.
- *
- * Deliberately a quieter palette than the issue itself: an issue marked
- * Resolved is still whatever the rules say it is, and the green here says the
- * team has dealt with it, not that the stock is now correct.
- *
- * @param {string} status
- * @returns {string}
- */
-export function actionStatusClass(status) {
-  switch (status) {
-    case 'Resolved':
-      return 'ok';
-    case 'In Progress':
-      return 'info';
-    case 'Open':
-      return 'neutral';
-    default:
-      return 'neutral';
-  }
-}
-
-/**
  * CSS class for a transfer status.
  *
  * @param {string} status
@@ -189,7 +190,6 @@ const STYLES = `
   img, svg { max-width: 100%; }
   header.masthead { background: #22303f; color: #fff; padding: .9rem var(--gutter) .1rem; }
   header.masthead .title { font-size: 1.05rem; font-weight: 600; letter-spacing: .01em; }
-  header.masthead .sub { font-size: .8rem; color: #a9b6c4; margin-top: .1rem; }
   nav { display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .75rem; }
   nav a {
     color: #cbd5e0; text-decoration: none; font-size: .88rem;
@@ -202,18 +202,52 @@ const STYLES = `
   h1 { font-size: 1.3rem; margin: 0 0 .2rem; overflow-wrap: break-word; }
   p.lede { color: var(--muted); font-size: .88rem; margin: 0 0 1.25rem; overflow-wrap: break-word; }
 
-  /* Dashboard tiles */
-  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: .9rem; margin: 0 0 1.75rem; }
+  /* Dashboard tiles.
+
+     Six cards on one grid: three to a row on a desktop, two on a tablet, one
+     on a phone. minmax(0, 1fr) rather than 1fr is what keeps the columns
+     exactly equal - a plain 1fr track has an automatic minimum, so the card
+     with the longest word would otherwise be allowed to push itself wider than
+     the other two in its row.
+
+     Grid already stretches every card in a row to the height of the tallest,
+     so the cards are equal in size whatever they contain. Making each card a
+     flex column and pushing .unit down with margin-top:auto lines the three
+     parts up ACROSS the row as well: the numbers share a top edge and the
+     descriptions share a bottom edge, so a name that wraps onto a second line
+     moves nothing else out of true.
+
+     The whole card is one <a>, so the number, the name and the description are
+     a single click target rather than three. */
+  .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .9rem; margin: 0 0 1.75rem; }
   .tile {
     background: #fff; border: 1px solid var(--line); border-radius: 7px; padding: .95rem 1rem;
-    display: block; text-decoration: none; color: inherit; min-width: 0;
+    display: flex; flex-direction: column; text-decoration: none; color: inherit; min-width: 0;
+    cursor: pointer;
+    transition: border-color .12s ease, box-shadow .12s ease, transform .12s ease;
   }
-  a.tile:hover { border-color: var(--accent); }
-  a.tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* Hover says "this is a shortcut" without moving the grid: the border picks
+     up the accent, a small shadow lifts the card off the page and it rises by
+     one pixel. The transform is a paint-only change, so nothing around it
+     reflows and no other card shifts. */
+  a.tile:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgb(15 23 32 / 10%); transform: translateY(-1px); }
+  a.tile:active { transform: translateY(0); box-shadow: none; }
+
+  /* Keyboard focus is the accent ring, offset so it sits clear of the border
+     and is visible against both the card and the page behind it. */
+  a.tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-color: var(--accent); }
+
+  /* Anyone who has asked for less movement gets the border and shadow only. */
+  @media (prefers-reduced-motion: reduce) {
+    .tile { transition: none; }
+    a.tile:hover { transform: none; }
+  }
   .tile .value { font-size: 1.9rem; font-weight: 600; line-height: 1.1; }
   .tile .label { font-size: .82rem; text-transform: uppercase; letter-spacing: .04em;
                  color: var(--muted); margin-top: .3rem; overflow-wrap: break-word; }
-  .tile .unit { font-size: .78rem; color: var(--muted); margin-top: .15rem; overflow-wrap: break-word; }
+  .tile .unit { font-size: .78rem; color: var(--muted); margin-top: auto; padding-top: .3rem;
+                overflow-wrap: break-word; }
   .tile.warn .value { color: var(--warn-fg); }
   .tile.bad .value { color: var(--bad-fg); }
   .tile.ok .value { color: var(--ok-fg); }
@@ -316,7 +350,7 @@ const STYLES = `
   /* --- Tablet: 768px to 1023px ------------------------------------------ */
   @media (max-width: 1023px) {
     :root { --gutter: 1.15rem; }
-    .tiles { grid-template-columns: repeat(2, 1fr); gap: .8rem; }
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
     /* Filter groups share the row and wrap onto the next one rather than being
        pushed off the edge. */
     .filters .field { flex: 1 1 13rem; }
@@ -329,7 +363,6 @@ const STYLES = `
   /* --- Mobile: below 768px ---------------------------------------------- */
   @media (max-width: 767px) {
     :root { --gutter: 1rem; }
-    header.masthead .sub { font-size: .76rem; }
     /* Every link is kept: they wrap onto as many rows as they need, squared
        off so a wrapped row does not read as a broken tab strip. */
     nav { gap: .3rem; margin-top: .65rem; padding-bottom: .5rem; }
@@ -337,7 +370,7 @@ const STYLES = `
     main { padding: 1.1rem var(--gutter) 2rem; }
     h1 { font-size: 1.15rem; }
     h2 { margin: 1.4rem 0 .5rem; }
-    .tiles { grid-template-columns: 1fr; gap: .7rem; margin-bottom: 1.4rem; }
+    .tiles { grid-template-columns: minmax(0, 1fr); gap: .7rem; margin-bottom: 1.4rem; }
     .tile { padding: .8rem .9rem; }
     .tile .value { font-size: 1.65rem; }
     .filters { padding: .75rem; gap: .6rem; }
@@ -387,13 +420,54 @@ const STYLES = `
 
   .page-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: 0 0 1rem; }
 
-  /* Per-row actions. Kept on one line inside the scrolling table. */
-  th.row-actions, td.row-actions { white-space: nowrap; }
-  td.row-actions a { color: var(--accent); text-decoration: none; font-size: .85rem;
-                     display: inline-block; padding: .25rem .25rem; }
-  td.row-actions a:hover { text-decoration: underline; }
-  td.row-actions a.remove { color: var(--bad-fg); }
-  td.row-actions .sep { color: #c8cdd4; }
+  /* The two dashboard summaries.
+
+     Every row is a single line - a badge, a count and a link - so they are
+     centred against each other rather than top-aligned. The list screens keep
+     the top alignment they need, because their cells wrap onto several lines
+     and a reason has to start level with the SKU beside it. */
+  /* The two dashboard summaries share one column layout.
+
+     table-layout: fixed is what makes the <col> widths binding rather than a
+     hint, so Count and Action sit at the same horizontal position on both
+     tables no matter how long the longest issue type happens to be. The first
+     column takes whatever is left, so the pair still fills the content width.
+
+     min-width keeps the two narrow columns legible on a phone: below it the
+     table scrolls inside .table-scroll, which is what stops the page itself
+     ever scrolling sideways. */
+  table.summary { table-layout: fixed; min-width: 22rem; }
+  table.summary col.c-count { width: 7rem; }
+  table.summary col.c-action { width: 8rem; }
+  table.summary td { vertical-align: middle; }
+  table.summary th, table.summary td { overflow-wrap: break-word; }
+
+  /* Per-row actions. One icon link per row, centred under the column heading. */
+  th.row-actions, td.row-actions { white-space: nowrap; text-align: center; }
+  td.row-actions a.icon { color: var(--accent); display: inline-flex; align-items: center;
+                          justify-content: center; width: 2rem; height: 2rem;
+                          border-radius: 5px; border: 1px solid transparent; }
+  td.row-actions a.icon:hover { background: var(--tile-hover, #eef2f7); border-color: #d5dbe3; }
+  td.row-actions a.icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  td.row-actions a.icon svg { display: block; }
+
+  /* Previous / Next across a filtered set. Same control above and below the
+     table, so it is where you are whichever end you reach. */
+  .pager { display: flex; align-items: center; gap: .5rem; margin: 0 0 .8rem; flex-wrap: wrap; }
+  .pager a, .pager .disabled {
+    font-size: .85rem; padding: .35rem .7rem; border-radius: 4px;
+    border: 1px solid #d5dbe3; text-decoration: none;
+  }
+  .pager a { color: var(--accent); background: #fff; }
+  .pager a:hover { background: #eef2f7; border-color: #b6bfca; }
+  .pager a:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .pager .disabled { color: var(--muted); background: #f5f7fa; border-color: #e5e9ee; }
+  .pager .position { font-size: .85rem; color: var(--muted); }
+
+  /* A line of explanation for something the source database cannot answer. */
+  .source-note { font-size: .85rem; color: var(--muted); margin: 0 0 .8rem;
+                 padding: .55rem .7rem; border-left: 3px solid #c8cdd4;
+                 background: #f5f7fa; border-radius: 0 4px 4px 0; }
 
   .flash { border: 1px solid; border-radius: 5px; padding: .6rem .8rem; margin: 0 0 1rem;
            font-size: .88rem; overflow-wrap: break-word; }
@@ -496,14 +570,13 @@ export function layout({ title, activePath, lede = '', body, flash = null }) {
 <body>
   <header class="masthead">
     <div class="title">Smart Inventory Control</div>
-    <div class="sub">Dummy data - demonstration MVP, not a live inventory system</div>
     <nav>${nav}</nav>
   </header>
   <main>
     <h1>${escapeHtml(title)}</h1>
     ${lede ? `<p class="lede">${escapeHtml(lede)}</p>` : ''}
 ${banner}${body}
-    <footer>Smart Inventory Control MVP. All products, warehouses, stock figures and transfers shown are invented.</footer>
+    <footer>Smart Inventory Control</footer>
   </main>
 </body>
 </html>
@@ -604,13 +677,87 @@ ${rows}
     </div>`;
 }
 
-/** Row count line above a table. */
-function countLine(shown, total, noun) {
-  const label =
-    shown === total
-      ? `${total} ${noun}${total === 1 ? '' : 's'}`
-      : `${shown} of ${total} ${noun}${total === 1 ? '' : 's'}`;
-  return `    <p class="count">${escapeHtml(label)}</p>`;
+/**
+ * A whole number, grouped for reading.
+ *
+ * The figures are real now - sixty-eight thousand stock lines, not fourteen -
+ * and an ungrouped 68237 is read wrong at a glance.
+ *
+ * @param {number} value
+ * @returns {string}
+ */
+export function number(value) {
+  return Number(value).toLocaleString('en-GB');
+}
+
+/**
+ * Row count line above a table.
+ *
+ * Three figures, because there are three: how many rows this page is showing,
+ * how many matched the filters, and how many exist. A screen capped at its
+ * display limit says so here rather than quietly showing the first page as if
+ * it were everything.
+ *
+ * @param {number} shown    Rows rendered in the table.
+ * @param {number} matched  Rows the filters selected.
+ * @param {number} total    Rows in the source.
+ * @param {string} noun
+ * @returns {string}
+ */
+function countLine(view, matched, total, noun) {
+  const plural = (n) => `${number(n)} ${noun}${n === 1 ? '' : 's'}`;
+
+  const head =
+    view.pageCount <= 1
+      ? plural(matched)
+      : `showing ${number(view.from)}–${number(view.to)} of ${plural(matched)}`;
+  const tail = matched === total ? '' : ` matching, out of ${number(total)}`;
+
+  return `    <p class="count">${escapeHtml(head + tail)}</p>`;
+}
+
+/**
+ * Previous / Next across a filtered set.
+ *
+ * Plain links carrying the current filters plus a page number, so a page is an
+ * ordinary URL that can be bookmarked, linked and opened in a new tab, and the
+ * screens still need no client-side JavaScript.
+ *
+ * Rendered above and below the table: on a 200-row page the bottom is where you
+ * are when you want the next one, and the top is where you are when you come
+ * back.
+ *
+ * @param {string} path
+ * @param {object} params     The filters currently applied.
+ * @param {{pageNumber: number, pageCount: number}} view
+ * @returns {string}
+ */
+function pager(path, params, view) {
+  if (view.pageCount <= 1) return '';
+
+  const at = (n) => href(path, { ...params, page: n });
+  const link = (n, label, rel) =>
+    `<a rel="${rel}" href="${at(n)}">${escapeHtml(label)}</a>`;
+  const disabled = (label) => `<span class="disabled">${escapeHtml(label)}</span>`;
+
+  const previous =
+    view.pageNumber > 1 ? link(view.pageNumber - 1, '← Previous', 'prev') : disabled('← Previous');
+  const next =
+    view.pageNumber < view.pageCount ? link(view.pageNumber + 1, 'Next →', 'next') : disabled('Next →');
+
+  const position = `<span class="position">Page ${number(view.pageNumber)} of ${number(view.pageCount)}</span>`;
+
+  return `    <nav class="pager" aria-label="Pagination">${previous}${position}${next}</nav>`;
+}
+
+/**
+ * A line of explanation above a table, for something the source cannot answer.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function sourceNote(text) {
+  return text ? `    <p class="source-note">${escapeHtml(text)}</p>` : '';
 }
 
 /* ========================================================================== */
@@ -650,24 +797,42 @@ export function href(path, params = {}) {
 }
 
 /**
- * The View / Edit / Delete cell for one table row.
+ * The Action cell for one table row.
  *
- * @param {{label: string, href: string, remove?: boolean}[]} links
+ * Icon links, not words. Every list screen has exactly one action per row now -
+ * the source is read-only, so there is nothing to edit or delete - and a column
+ * of identical "View" words is noise next to the figures that matter. The
+ * accessible name is still the word, on the link itself.
+ *
+ * @param {{label: string, href: string}[]} links
  * @returns {string}
  */
 function rowActions(links) {
   const rendered = links
     .map(
       (link) =>
-        `<a class="${link.remove ? 'remove' : ''}" href="${link.href}">${escapeHtml(link.label)}</a>`,
+        `<a class="icon" title="${escapeHtml(link.label)}" aria-label="${escapeHtml(link.label)}" href="${link.href}">${ICON_VIEW}</a>`,
     )
-    .join('<span class="sep">|</span>');
+    .join('');
 
   return `<td class="row-actions">${rendered}</td>`;
 }
 
 /**
- * The button bar above a table or a record.
+ * One field on a view screen.
+ *
+ * A row is given either text, which is escaped, or html, which is not and is
+ * only ever markup this module built itself - a pill, a thumbnail, a signed
+ * difference. Nothing from a form ever arrives as html.
+ *
+ * @typedef {{label: string, text?: unknown, html?: string, derived?: string}} DetailRow
+ */
+
+/**
+ * The button bar above a record.
+ *
+ * Only ever navigation now - "Back to products", "View the stock line". There
+ * is nothing to add, edit or delete, so nothing here submits anything.
  *
  * @param {{label: string, href: string, tone?: string}[]} buttons
  * @returns {string}
@@ -684,16 +849,6 @@ function pageActions(buttons) {
 
   return `    <div class="page-actions">\n${rendered}\n    </div>`;
 }
-
-/**
- * One field on a view screen.
- *
- * A row is given either text, which is escaped, or html, which is not and is
- * only ever markup this module built itself - a pill, a thumbnail, a signed
- * difference. Nothing from a form ever arrives as html.
- *
- * @typedef {{label: string, text?: unknown, html?: string, derived?: string}} DetailRow
- */
 
 /**
  * A read-only view of one record.
@@ -753,264 +908,115 @@ ${extra}`;
  * @property {{value: string, label: string}[]} [options] For select and checkboxes.
  */
 
-/**
- * An add or edit form.
- *
- * Submitted values are handed back in `values` and errors in `errors`, so a
- * rejected form comes back with what the member of staff typed still in it and
- * the problem named against the field it belongs to - not a blank form and a
- * vague apology.
- *
- * @param {object} options
- * @returns {string}
- */
-export function renderFormPage({
-  title,
-  activePath,
-  lede = '',
-  action,
-  fields,
-  values = {},
-  errors = {},
-  hidden = {},
-  submitLabel = 'Save',
-  cancelHref,
-  note = '',
-  flash = null,
-}) {
-  const messages = Object.values(errors);
-  const summary =
-    messages.length === 0
-      ? ''
-      : `    <div class="errors">
-      <strong>${escapeHtml(
-        messages.length === 1 ? 'One field needs attention:' : `${messages.length} fields need attention:`,
-      )}</strong>
-      <ul>${messages.map((message) => `<li>${escapeHtml(message)}</li>`).join('')}</ul>
-    </div>`;
-
-  const control = (field) => {
-    const value = values[field.name];
-    const invalid = Boolean(errors[field.name]);
-    const id = `f-${field.name}`;
-
-    if (field.kind === 'select') {
-      const options = (field.options ?? [])
-        .map(
-          (option) =>
-            `<option value="${escapeHtml(option.value)}"${option.value === String(value ?? '') ? ' selected' : ''}>${escapeHtml(option.label)}</option>`,
-        )
-        .join('');
-      return `<select id="${id}" name="${escapeHtml(field.name)}">${options}</select>`;
-    }
-
-    if (field.kind === 'textarea') {
-      return `<textarea id="${id}" name="${escapeHtml(field.name)}" rows="4">${escapeHtml(value ?? '')}</textarea>`;
-    }
-
-    if (field.kind === 'checkboxes') {
-      // A form posts one value as a string and several as an array, so a single
-      // ticked box must not come back as an unticked one.
-      const chosen = (Array.isArray(value) ? value : value ? [value] : []).map(String);
-      const boxes = (field.options ?? [])
-        .map(
-          (option) =>
-            `<label><input type="checkbox" name="${escapeHtml(field.name)}" value="${escapeHtml(option.value)}"${chosen.includes(option.value) ? ' checked' : ''}> ${escapeHtml(option.label)}</label>`,
-        )
-        .join('');
-      return `<div class="options">${boxes}</div>`;
-    }
-
-    if (field.kind === 'readonly') {
-      // Also submitted as a hidden field, because a readonly input is easy to
-      // edit from a console and must not be trusted as the record's key.
-      return `<input id="${id}" type="text" value="${escapeHtml(value ?? '')}" readonly>`;
-    }
-
-    const type = field.kind === 'number' ? 'number' : field.kind === 'date' ? 'date' : 'text';
-    const step = field.kind === 'number' ? ' step="1"' : '';
-    return `<input id="${id}" type="${type}"${step} name="${escapeHtml(field.name)}" value="${escapeHtml(value ?? '')}"${invalid ? ' aria-invalid="true"' : ''}>`;
-  };
-
-  const controls = fields
-    .map((field) => {
-      const invalid = errors[field.name] ? ' bad' : '';
-      const wide = field.wide || field.kind === 'checkboxes' || field.kind === 'textarea' ? ' wide' : '';
-      const hint = field.hint ? `\n          <span class="hint">${escapeHtml(field.hint)}</span>` : '';
-      const message = errors[field.name]
-        ? `\n          <span class="field-error">${escapeHtml(errors[field.name])}</span>`
-        : '';
-
-      return `        <div class="field${wide}${invalid}">
-          <label class="caption" for="f-${escapeHtml(field.name)}">${escapeHtml(field.label)}</label>
-          ${control(field)}${hint}${message}
-        </div>`;
-    })
-    .join('\n');
-
-  const hiddenFields = Object.entries(hidden)
-    .map(
-      ([name, value]) =>
-        `      <input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`,
-    )
-    .join('\n');
-
-  const body = `${summary}
-${note ? `    <p class="note">${escapeHtml(note)}</p>` : ''}
-    <form class="record" method="post" action="${escapeHtml(action)}">
-${hiddenFields}
-      <div class="grid">
-${controls}
-      </div>
-      <div class="buttons">
-        <button type="submit">${escapeHtml(submitLabel)}</button>
-        <a class="btn secondary" href="${cancelHref}">Cancel</a>
-      </div>
-    </form>`;
-
-  return layout({ title, activePath, lede, body, flash });
-}
-
-/**
- * The confirmation step in front of a delete.
- *
- * Nothing is removed by reaching this page: it is a plain GET that shows what
- * would go and asks. The removal only happens when the form on it is posted.
- *
- * @param {object} options
- * @returns {string}
- */
-export function renderConfirmPage({
-  title,
-  activePath,
-  lede = '',
-  warning,
-  rows,
-  action,
-  hidden = {},
-  confirmLabel = 'Delete',
-  cancelHref,
-  blocked = false,
-  consent = null,
-  flash = null,
-}) {
-  const items = rows
-    .map((row, index) => {
-      const last = index === rows.length - 1 ? 'last' : '';
-      return `        <dt class="${last}">${escapeHtml(row.label)}</dt>
-        <dd class="${last}">${row.html ?? escapeHtml(row.text)}</dd>`;
-    })
-    .join('\n');
-
-  const hiddenFields = Object.entries(hidden)
-    .map(
-      ([name, value]) =>
-        `      <input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`,
-    )
-    .join('\n');
-
-  const consentBox = consent
-    ? `      <div class="field wide">
-        <div class="options">
-          <label><input type="checkbox" name="${escapeHtml(consent.name)}" value="yes"> ${escapeHtml(consent.label)}</label>
-        </div>
-      </div>`
-    : '';
-
-  const form = blocked
-    ? `    <p><a class="btn secondary" href="${cancelHref}">Back</a></p>`
-    : `    <form class="record" method="post" action="${escapeHtml(action)}">
-${hiddenFields}
-${consentBox}
-      <div class="buttons">
-        <button class="btn danger" type="submit">${escapeHtml(confirmLabel)}</button>
-        <a class="btn secondary" href="${cancelHref}">Cancel</a>
-      </div>
-    </form>`;
-
-  const body = `    <p class="flash ${blocked ? 'bad' : 'warn'}">${escapeHtml(warning)}</p>
-    <div class="detail">
-      <dl>
-${items}
-      </dl>
-    </div>
-${form}`;
-
-  return layout({ title, activePath, lede, body, flash });
-}
-
 /* ========================================================================== */
 /* 1. DASHBOARD                                                               */
 /* ========================================================================== */
 
 /**
+ * The dashboard: six figures, then two summaries.
+ *
+ * Each card is a shortcut. The whole card is one <a>, so the number, its name
+ * and its description are all the same click, and it lands on the screen that
+ * shows the rows behind the figure already filtered to them.
+ *
+ * Under them, what was detected and what is in flight, as counts with a link
+ * through to the rows. Both tables are read-only: nothing is raised, actioned
+ * or edited here. The counts are handed in - this file evaluates no rule and
+ * reads no data.
+ *
  * @param {object} options
- * @param {object} options.metrics       From dashboardMetrics().
- * @param {object[]} options.issueCounts From issueCounts().
+ * @param {object} options.metrics          From dashboardMetrics().
+ * @param {object[]} options.issueCounts    From issueCounts().
  * @param {object[]} options.transferCounts From transferCounts().
  */
 export function renderDashboardPage({ metrics, issueCounts, transferCounts }) {
   const tile = (href, value, label, unit, tone) =>
-    `      <a class="tile ${tone}" href="${escapeHtml(href)}">
-        <div class="value">${escapeHtml(String(value))}</div>
+    `      <a class="${escapeHtml(tone ? `tile ${tone}` : 'tile')}" href="${escapeHtml(href)}">
+        <div class="value">${escapeHtml(number(value))}</div>
         <div class="label">${escapeHtml(label)}</div>
         <div class="unit">${escapeHtml(unit)}</div>
       </a>`;
 
+  /*
+   * All six cards count catalogue SKUs, and each one drills through to the
+   * screen that lists exactly the SKUs it counted - so the figure on the card
+   * and the figure on the screen it opens are the same number. A card linking
+   * to a screen that counts something else is worse than no link at all.
+   */
   const tiles = [
     tile('/products', metrics.totalSkus, 'Total SKUs', 'in the catalogue', ''),
-    tile('/stock?status=Healthy', metrics.healthyStock, 'Healthy Stock', 'stock lines', 'ok'),
-    tile('/stock?status=Low+Stock', metrics.lowStock, 'Low Stock', 'stock lines', 'warn'),
-    tile('/stock?status=Out+of+Stock', metrics.outOfStock, 'Out-of-Stock Items', 'stock lines', 'bad'),
+    tile('/products?stock=Healthy', metrics.healthyStock, 'Healthy Stock', 'SKUs', 'ok'),
+    tile('/products?stock=Low+Stock', metrics.lowStock, 'Low Stock', 'SKUs', 'warn'),
+    tile('/products?stock=Out+of+Stock', metrics.outOfStock, 'Out-of-Stock Items', 'SKUs', 'bad'),
+    // ?show=discrepancy is what the audit screen's Show filter reads, so the
+    // card lands with that dropdown already set to Discrepancies only.
     tile('/audit?show=discrepancy', metrics.discrepancies, 'Discrepancies', 'audit lines that disagree', 'bad'),
     tile('/transfers?status=Pending', metrics.pendingTransfers, 'Pending Transfers', 'awaiting despatch', 'warn'),
   ].join('\n');
 
-  const issueRows = issueCounts
-    .map(
-      (row) => `          <tr>
-            <td><span class="pill ${escapeHtml(issueClass(row.type))}">${escapeHtml(row.type)}</span></td>
-            <td class="num">${escapeHtml(String(row.count))}</td>
-            <td><a href="/alerts?type=${encodeURIComponent(row.type)}">View</a></td>
+  /*
+   * The two summaries under the cards.
+   *
+   * Both are counts only, with a link through to the screen that holds the
+   * rows. Nothing is raised, actioned or edited here - that stays on the
+   * Alerts and Transfers screens, which these link to.
+   *
+   * The counts come from issueCounts() and transferCounts() in reports.js, so
+   * the six rules are evaluated in exactly one place and this file only prints
+   * what it is handed.
+   */
+  const summaryRows = (rows, cell, href) =>
+    rows
+      .map(
+        (row) => `          <tr>
+            <td>${cell(row)}</td>
+            <td class="num">${escapeHtml(number(row.count))}</td>
+            <td class="row-actions"><a class="icon" title="View" aria-label="View" href="${escapeHtml(href(row))}">${ICON_VIEW}</a></td>
           </tr>`,
-    )
-    .join('\n');
+      )
+      .join('\n');
 
-  const transferRows = transferCounts
-    .map(
-      (row) => `          <tr>
-            <td><span class="pill ${escapeHtml(transferStatusClass(row.status))}">${escapeHtml(row.status)}</span></td>
-            <td class="num">${escapeHtml(String(row.count))}</td>
-            <td><a href="/transfers?status=${encodeURIComponent(row.status)}">View</a></td>
-          </tr>`,
-    )
-    .join('\n');
+  /*
+   * One <colgroup> for both tables, so Count and Action start at the same
+   * horizontal position on each. Left to size themselves, the two tables would
+   * measure their own first column - "Warehouse/SKU Mismatch" against
+   * "In Transit" - and put the other two columns in different places, which
+   * reads as two unrelated tables rather than two views of the same shape.
+   *
+   * The widths are enforced by table-layout: fixed in the stylesheet; without
+   * it a <col> width is only a suggestion the browser may overrule.
+   */
+  const summaryTable = (heading, firstColumn, rows) => `    <h2>${escapeHtml(heading)}</h2>
+    <div class="table-scroll">
+      <table class="summary">
+        <colgroup><col class="c-name"><col class="c-count"><col class="c-action"></colgroup>
+        <thead><tr><th>${escapeHtml(firstColumn)}</th><th class="num">Count</th><th class="row-actions">Action</th></tr></thead>
+        <tbody>
+${rows}
+        </tbody>
+      </table>
+    </div>`;
+
+  const issueRows = summaryRows(
+    issueCounts,
+    (row) => `<span class="pill ${escapeHtml(issueClass(row.type))}">${escapeHtml(row.type)}</span>`,
+    (row) => href('/alerts', { type: row.type }),
+  );
+
+  const transferRows = summaryRows(
+    transferCounts,
+    (row) =>
+      `<span class="pill ${escapeHtml(transferStatusClass(row.status))}">${escapeHtml(row.status)}</span>`,
+    (row) => href('/transfers', { status: row.status }),
+  );
 
   const body = `    <div class="tiles">
 ${tiles}
     </div>
 
-    <p class="note">Stock figures count stock lines - one SKU held at one warehouse - because the same SKU can be healthy at one site and out of stock at another. Across ${escapeHtml(String(metrics.totalStockLines))} stock lines, every line falls into exactly one of Healthy, Low, Out of Stock or Negative.</p>
+${summaryTable('Issues detected', 'Issue type', issueRows)}
 
-    <h2>Issues detected</h2>
-    <div class="table-scroll">
-      <table>
-        <thead><tr><th>Issue type</th><th class="num">Count</th><th>Action</th></tr></thead>
-        <tbody>
-${issueRows}
-        </tbody>
-      </table>
-    </div>
-
-    <h2>Transfers by status</h2>
-    <div class="table-scroll">
-      <table>
-        <thead><tr><th>Status</th><th class="num">Count</th><th>Action</th></tr></thead>
-        <tbody>
-${transferRows}
-        </tbody>
-      </table>
-    </div>`;
+${summaryTable('Transfers by status', 'Status', transferRows)}`;
 
   return layout({
     title: 'Dashboard',
@@ -1026,13 +1032,17 @@ ${transferRows}
 
 export function renderProductsPage({
   products,
+  view,
+  params = {},
   total,
+  matched,
   categories,
   suppliers,
+  statuses = [],
   search = '',
   category = '',
   supplier = '',
-  unknownSkus = [],
+  stock = '',
   flash = null,
 }) {
   const rows = products
@@ -1045,25 +1055,25 @@ export function renderProductsPage({
             <td class="thumb-cell"><img class="thumb" src="${escapeHtml(product.image)}" alt="" width="40" height="40"></td>
             <td class="sku">${escapeHtml(product.sku)}</td>
             <td class="name">${escapeHtml(product.name)}</td>
-            <td>${escapeHtml(product.category)}</td>
-            <td>${escapeHtml(product.supplier)}</td>
+            <td>${escapeHtml(product.category ?? NOT_IN_SOURCE)}</td>
+            <td>${escapeHtml(product.supplier ?? NOT_IN_SOURCE)}</td>
             <td>${status}</td>
-            <td class="num">${escapeHtml(String(product.unitsHeld))}</td>
-            ${rowActions([
-              { label: 'View', href: href('/products/view', { sku: product.sku }) },
-              { label: 'Edit', href: href('/products/edit', { sku: product.sku }) },
-              { label: 'Delete', href: href('/products/delete', { sku: product.sku }), remove: true },
-            ])}
+            <td class="num">${escapeHtml(number(product.unitsHeld))}</td>
+            <td><span class="pill ${escapeHtml(statusClass(product.stockStatus))}">${escapeHtml(product.stockStatus)}</span></td>
+            ${rowActions([{ label: 'View', href: href('/products/view', { sku: product.sku }) }])}
           </tr>`;
     })
     .join('\n');
 
+  // Stock is the band for the SKU across every warehouse, which is what the
+  // dashboard cards count - so a card and this column always say the same
+  // thing about the same product.
   const head =
-    '<th>Image</th><th>SKU</th><th>Product Name</th><th>Category</th><th>Supplier</th><th>Listing</th><th class="num">Units held</th><th class="row-actions">Actions</th>';
+    '<th>Image</th><th>SKU</th><th>Product Name</th><th>Category</th><th>Supplier</th><th>Listing</th><th class="num">Units held</th><th>Stock</th><th class="row-actions">Action</th>';
 
   const filters = renderFilters({
     action: '/products',
-    showReset: Boolean(search || category || supplier),
+    showReset: Boolean(search || category || supplier || stock),
     controls: [
       { kind: 'search', name: 'q', label: 'Search', value: search, placeholder: 'SKU, name or supplier' },
       {
@@ -1080,19 +1090,22 @@ export function renderProductsPage({
         value: supplier,
         options: suppliers.map((sup) => ({ value: sup, label: sup })),
       },
+      {
+        // What the dashboard cards drill through to.
+        name: 'stock',
+        label: 'Stock',
+        allLabel: 'All stock positions',
+        value: stock,
+        options: statuses.map((st) => ({ value: st, label: st })),
+      },
     ],
   });
 
-  const unknownNote =
-    unknownSkus.length === 0
-      ? ''
-      : `    <p class="note">Stock is recorded against ${escapeHtml(String(unknownSkus.length))} SKU${unknownSkus.length === 1 ? '' : 's'} that ${unknownSkus.length === 1 ? 'is' : 'are'} not in this catalogue: ${escapeHtml(unknownSkus.join(', '))}. ${unknownSkus.length === 1 ? 'It is' : 'They are'} reported on the Alerts screen as a Warehouse/SKU Mismatch.</p>`;
-
-  const body = `${pageActions([{ label: 'Add product', href: '/products/add' }])}
-${filters}
-${unknownNote}
-${countLine(products.length, total, 'product')}
-${tableOrEmpty(rows, head, 'No products match these filters.')}`;
+  const body = `${filters}
+${countLine(view, matched, total, 'product')}
+${pager('/products', params, view)}
+${tableOrEmpty(rows, head, 'No products match these filters.')}
+${pager('/products', params, view)}`;
 
   return layout({
     title: 'Products',
@@ -1109,12 +1122,17 @@ ${tableOrEmpty(rows, head, 'No products match these filters.')}`;
 
 export function renderStockPage({
   lines,
+  view,
+  params = {},
   total,
+  matched,
   warehouses,
   statuses,
   warehouseId = '',
   status = '',
   search = '',
+  threshold = 0,
+  note = '',
   flash = null,
 }) {
   const rows = lines
@@ -1128,44 +1146,37 @@ export function renderStockPage({
 
       const onHand =
         line.onHand < 0
-          ? `<span class="neg">${escapeHtml(String(line.onHand))}</span>`
-          : escapeHtml(String(line.onHand));
+          ? `<span class="neg">${escapeHtml(number(line.onHand))}</span>`
+          : escapeHtml(number(line.onHand));
 
       const available =
         line.available <= 0
-          ? `<span class="neg">${escapeHtml(String(line.available))}</span>`
-          : escapeHtml(String(line.available));
+          ? `<span class="neg">${escapeHtml(number(line.available))}</span>`
+          : escapeHtml(number(line.available));
 
       return `          <tr${rowClass}>
             <td class="sku">${escapeHtml(line.sku)}</td>
             <td class="name">${escapeHtml(line.productName)}</td>
             <td>${escapeHtml(line.warehouseName)}</td>
             <td class="num">${onHand}</td>
-            <td class="num">${escapeHtml(String(line.reserved))}</td>
+            <td class="num">${escapeHtml(number(line.reserved))}</td>
             <td class="num">${available}</td>
-            <td class="num">${escapeHtml(String(line.minimum))}</td>
             <td><span class="pill ${escapeHtml(statusClass(line.status))}">${escapeHtml(line.status)}</span></td>
             ${rowActions([
               {
                 label: 'View',
                 href: href('/stock/view', { sku: line.sku, warehouse: line.warehouseId }),
               },
-              {
-                label: 'Edit',
-                href: href('/stock/edit', { sku: line.sku, warehouse: line.warehouseId }),
-              },
-              {
-                label: 'Delete',
-                href: href('/stock/delete', { sku: line.sku, warehouse: line.warehouseId }),
-                remove: true,
-              },
             ])}
           </tr>`;
     })
     .join('\n');
 
+  // No Minimum column. There is no minimum in the source database, so the only
+  // thing this column could hold is the application threshold repeated on every
+  // one of sixty-eight thousand rows. It is stated once, above the table.
   const head =
-    '<th>SKU</th><th>Product</th><th>Warehouse</th><th class="num">Current</th><th class="num">Reserved</th><th class="num">Available</th><th class="num">Minimum</th><th>Status</th><th class="row-actions">Actions</th>';
+    '<th>SKU</th><th>Product</th><th>Warehouse</th><th class="num">Current</th><th class="num">Reserved</th><th class="num">Available</th><th>Status</th><th class="row-actions">Action</th>';
 
   const filters = renderFilters({
     action: '/stock',
@@ -1189,16 +1200,17 @@ export function renderStockPage({
     ],
   });
 
-  const body = `${pageActions([{ label: 'Add stock record', href: '/stock/add' }])}
-${filters}
-    <p class="note">Available is not stored - it is always Current minus Reserved. A line can show stock on hand and still have nothing available when every unit is reserved. There is no field for Available on the add or edit form for the same reason.</p>
-${countLine(lines.length, total, 'stock line')}
-${tableOrEmpty(rows, head, 'No stock lines match these filters.')}`;
+  const body = `${filters}
+${countLine(view, matched, total, 'stock line')}
+${pager('/stock', params, view)}
+${sourceNote(note ? `Low Stock is flagged below ${number(threshold)} available. ${note}` : '')}
+${tableOrEmpty(rows, head, 'No stock lines match these filters.')}
+${pager('/stock', params, view)}`;
 
   return layout({
     title: 'Warehouse Stock',
     activePath: '/stock',
-    lede: 'Stock held by SKU and warehouse.',
+    lede: 'Stock held by SKU and warehouse. Available is Current minus Reserved.',
     body,
     flash,
   });
@@ -1210,13 +1222,14 @@ ${tableOrEmpty(rows, head, 'No stock lines match these filters.')}`;
 
 export function renderIssuesPage({
   issues,
+  view,
+  params = {},
   total,
+  matched,
   issueTypes,
   warehouses,
-  actionStatuses = [],
   type = '',
   warehouseId = '',
-  actionStatus = '',
   flash = null,
 }) {
   const rows = issues
@@ -1226,7 +1239,6 @@ export function renderIssuesPage({
         issue.type === 'Out of Stock' ||
         issue.type === 'Warehouse/SKU Mismatch';
 
-      const action = issue.action ?? { status: 'Open', note: '' };
       const key = { type: issue.type, sku: issue.sku, warehouse: issue.warehouseId };
 
       return `          <tr${serious ? ' class="serious"' : ' class="flagged"'}>
@@ -1234,24 +1246,19 @@ export function renderIssuesPage({
             <td class="sku">${escapeHtml(issue.sku)}</td>
             <td class="name">${escapeHtml(issue.productName)}</td>
             <td>${escapeHtml(issue.warehouseName)}</td>
-            <td class="num">${escapeHtml(String(issue.available))}</td>
-            <td class="num">${escapeHtml(String(issue.minimum))}</td>
+            <td class="num">${escapeHtml(number(issue.available))}</td>
             <td class="reason">${escapeHtml(issue.detail)}</td>
-            <td><span class="pill ${escapeHtml(actionStatusClass(action.status))}">${escapeHtml(action.status)}</span></td>
-            ${rowActions([
-              { label: 'View', href: href('/alerts/view', key) },
-              { label: 'Action', href: href('/alerts/edit', key) },
-            ])}
+            ${rowActions([{ label: 'View', href: href('/alerts/view', key) }])}
           </tr>`;
     })
     .join('\n');
 
   const head =
-    '<th>Issue</th><th>SKU</th><th>Product</th><th>Warehouse</th><th class="num">Available</th><th class="num">Minimum</th><th>Why it was raised</th><th>Action status</th><th class="row-actions">Actions</th>';
+    '<th>Issue</th><th>SKU</th><th>Product</th><th>Warehouse</th><th class="num">Available</th><th>Why it was raised</th><th class="row-actions">Action</th>';
 
   const filters = renderFilters({
     action: '/alerts',
-    showReset: Boolean(type || warehouseId || actionStatus),
+    showReset: Boolean(type || warehouseId),
     controls: [
       {
         name: 'type',
@@ -1267,25 +1274,19 @@ export function renderIssuesPage({
         value: warehouseId,
         options: warehouses.map((w) => ({ value: w.id, label: w.name })),
       },
-      {
-        name: 'action',
-        label: 'Action status',
-        allLabel: 'All action statuses',
-        value: actionStatus,
-        options: actionStatuses.map((st) => ({ value: st, label: st })),
-      },
     ],
   });
 
   const body = `${filters}
-    <p class="note">Issues are worked out from the stock data every time this page is loaded - nothing is raised or cleared by hand. One stock line can raise more than one issue. Action status records what staff did about a problem; it never hides one. A shortage marked Resolved is still detected, still listed here and still counted on the dashboard until the stock figures themselves change.</p>
-${countLine(issues.length, total, 'issue')}
-${tableOrEmpty(rows, head, 'No issues match these filters.')}`;
+${countLine(view, matched, total, 'issue')}
+${pager('/alerts', params, view)}
+${tableOrEmpty(rows, head, 'No issues match these filters.')}
+${pager('/alerts', params, view)}`;
 
   return layout({
     title: 'Alerts / Issues',
     activePath: '/alerts',
-    lede: 'Problems detected in the current stock position.',
+    lede: 'Problems detected in the current stock position. Recalculated on every page load; nothing is stored.',
     body,
     flash,
   });
@@ -1297,12 +1298,16 @@ ${tableOrEmpty(rows, head, 'No issues match these filters.')}`;
 
 export function renderTransfersPage({
   transfers,
+  view,
+  params = {},
   total,
+  matched,
   statuses,
   warehouses,
   status = '',
   fromWarehouseId = '',
   toWarehouseId = '',
+  note = '',
   flash = null,
 }) {
   const rows = transfers
@@ -1313,20 +1318,16 @@ export function renderTransfersPage({
             <td class="name">${escapeHtml(transfer.productName)}</td>
             <td>${escapeHtml(transfer.fromWarehouseName)}</td>
             <td>${escapeHtml(transfer.toWarehouseName)}</td>
-            <td class="num">${escapeHtml(String(transfer.quantity))}</td>
+            <td class="num">${escapeHtml(number(transfer.quantity))}</td>
             <td><span class="pill ${escapeHtml(transferStatusClass(transfer.status))}">${escapeHtml(transfer.status)}</span></td>
             <td class="muted">${escapeHtml(transfer.raisedOn)}</td>
-            ${rowActions([
-              { label: 'View', href: href('/transfers/view', { id: transfer.id }) },
-              { label: 'Edit', href: href('/transfers/edit', { id: transfer.id }) },
-              { label: 'Delete', href: href('/transfers/delete', { id: transfer.id }), remove: true },
-            ])}
+            ${rowActions([{ label: 'View', href: href('/transfers/view', { id: transfer.id }) }])}
           </tr>`,
     )
     .join('\n');
 
   const head =
-    '<th>Transfer ID</th><th>SKU</th><th>Product</th><th>From</th><th>To</th><th class="num">Qty</th><th>Status</th><th>Raised</th><th class="row-actions">Actions</th>';
+    '<th>Transfer ID</th><th>SKU</th><th>Product</th><th>From</th><th>To</th><th class="num">Qty</th><th>Status</th><th>Raised</th><th class="row-actions">Action</th>';
 
   const filters = renderFilters({
     action: '/transfers',
@@ -1356,11 +1357,12 @@ export function renderTransfersPage({
     ],
   });
 
-  const body = `${pageActions([{ label: 'Add transfer', href: '/transfers/add' }])}
-${filters}
-    <p class="note">Transfers are a record only in this MVP: the quantities shown are not applied to the warehouse stock figures. Adding, editing or deleting one here changes the transfer record and nothing else.</p>
-${countLine(transfers.length, total, 'transfer')}
-${tableOrEmpty(rows, head, 'No transfers match these filters.')}`;
+  const body = `${filters}
+${countLine(view, matched, total, 'transfer')}
+${pager('/transfers', params, view)}
+${sourceNote(note)}
+${tableOrEmpty(rows, head, 'No transfers match these filters.')}
+${pager('/transfers', params, view)}`;
 
   return layout({
     title: 'Transfers',
@@ -1377,10 +1379,14 @@ ${tableOrEmpty(rows, head, 'No transfers match these filters.')}`;
 
 export function renderAuditPage({
   rows: auditRows,
+  view,
+  params = {},
   total,
+  matched,
   warehouses,
   warehouseId = '',
   differencesOnly = false,
+  note = '',
   flash = null,
 }) {
   const rows = auditRows
@@ -1393,22 +1399,18 @@ export function renderAuditPage({
             <td class="sku">${escapeHtml(row.sku)}</td>
             <td class="name">${escapeHtml(row.productName)}</td>
             <td>${escapeHtml(row.warehouseName)}</td>
-            <td class="num">${escapeHtml(String(row.systemQuantity))}</td>
-            <td class="num">${escapeHtml(String(row.countedQuantity))}</td>
+            <td class="num">${escapeHtml(number(row.systemQuantity))}</td>
+            <td class="num">${escapeHtml(number(row.countedQuantity))}</td>
             <td class="num">${differenceCell}</td>
             <td>${row.matches ? '<span class="pill ok">Matches</span>' : '<span class="pill bad">Discrepancy</span>'}</td>
             <td class="muted">${escapeHtml(row.countedOn)} (${escapeHtml(row.countedBy)})</td>
-            ${rowActions([
-              { label: 'View', href: href('/audit/view', { id: row.id }) },
-              { label: 'Edit', href: href('/audit/edit', { id: row.id }) },
-              { label: 'Delete', href: href('/audit/delete', { id: row.id }), remove: true },
-            ])}
+            ${rowActions([{ label: 'View', href: href('/audit/view', { id: row.id }) }])}
           </tr>`;
     })
     .join('\n');
 
   const head =
-    '<th>SKU</th><th>Product</th><th>Warehouse</th><th class="num">System Qty</th><th class="num">Counted Qty</th><th class="num">Difference</th><th>Result</th><th>Counted</th><th class="row-actions">Actions</th>';
+    '<th>SKU</th><th>Product</th><th>Warehouse</th><th class="num">System Qty</th><th class="num">Counted Qty</th><th class="num">Difference</th><th>Result</th><th>Counted</th><th class="row-actions">Action</th>';
 
   const filters = renderFilters({
     action: '/audit',
@@ -1424,20 +1426,21 @@ export function renderAuditPage({
       {
         // Every line, or only the ones where the count and the system disagree.
         // Two outcomes, so one dropdown with All and the one narrowing it does.
-        name: 'difference',
+        name: 'show',
         label: 'Show',
         allLabel: 'All lines',
-        value: differencesOnly ? 'yes' : '',
-        options: [{ value: 'yes', label: 'Discrepancies only' }],
+        value: differencesOnly ? 'discrepancy' : '',
+        options: [{ value: 'discrepancy', label: 'Discrepancies only' }],
       },
     ],
   });
 
-  const body = `${pageActions([{ label: 'Add audit record', href: '/audit/add' }])}
-${filters}
-    <p class="note">Difference is Counted minus System. A positive difference means more was found than expected; a negative difference means less. It is worked out every time this page is drawn, so there is no field for it on the add or edit form and no way for a stored figure to disagree with the two it comes from.</p>
-${countLine(auditRows.length, total, 'audit line')}
-${tableOrEmpty(rows, head, 'No audit lines match these filters.')}`;
+  const body = `${filters}
+${countLine(view, matched, total, 'audit line')}
+${pager('/audit', params, view)}
+${sourceNote(note)}
+${tableOrEmpty(rows, head, 'No audit lines match these filters.')}
+${pager('/audit', params, view)}`;
 
   return layout({
     title: 'Inventory Audit',
@@ -1453,29 +1456,15 @@ ${tableOrEmpty(rows, head, 'No audit lines match these filters.')}`;
 /* ========================================================================== */
 
 /*
- * View, add, edit and delete for each of the five areas.
+ * The view page for each of the five areas. There is no add, edit or delete
+ * counterpart: the data belongs to the source database, which this application
+ * reads and never writes.
  *
- * Every function here is a thin wrapper over renderRecordPage, renderFormPage
- * or renderConfirmPage: it decides what a member of staff needs to see for that
- * kind of record and hands it over. None of them work anything out - the router
- * arrives with the record already assembled - and none of them write anything.
+ * Every function here is a thin wrapper over renderRecordPage. It decides what
+ * a member of staff needs to see for that kind of record and hands it over.
+ * None of them work anything out - the router arrives with the record already
+ * assembled.
  */
-
-/** SKU options for the forms that must point at a real product. */
-function skuOptions(products, placeholder = 'Choose a SKU') {
-  return [
-    { value: '', label: placeholder },
-    ...products.map((product) => ({ value: product.sku, label: `${product.sku} - ${product.name}` })),
-  ];
-}
-
-/** Warehouse options for the forms that must point at a real site. */
-function warehouseOptions(warehouses, placeholder = 'Choose a warehouse') {
-  return [
-    { value: '', label: placeholder },
-    ...warehouses.map((warehouse) => ({ value: warehouse.id, label: warehouse.name })),
-  ];
-}
 
 /* --- Products ------------------------------------------------------------- */
 
@@ -1490,10 +1479,9 @@ export function renderProductViewPage({ product, stockLines, flash = null }) {
     .map(
       (line) => `          <tr>
             <td>${escapeHtml(line.warehouseName)}</td>
-            <td class="num">${escapeHtml(String(line.onHand))}</td>
-            <td class="num">${escapeHtml(String(line.reserved))}</td>
-            <td class="num">${escapeHtml(String(line.available))}</td>
-            <td class="num">${escapeHtml(String(line.minimum))}</td>
+            <td class="num">${escapeHtml(number(line.onHand))}</td>
+            <td class="num">${escapeHtml(number(line.reserved))}</td>
+            <td class="num">${escapeHtml(number(line.available))}</td>
             <td><span class="pill ${escapeHtml(statusClass(line.status))}">${escapeHtml(line.status)}</span></td>
           </tr>`,
     )
@@ -1504,142 +1492,60 @@ export function renderProductViewPage({ product, stockLines, flash = null }) {
       ? '    <p class="empty">No stock is recorded against this SKU at any warehouse.</p>'
       : `    <div class="table-scroll">
       <table>
-        <thead><tr><th>Warehouse</th><th class="num">Current</th><th class="num">Reserved</th><th class="num">Available</th><th class="num">Minimum</th><th>Status</th></tr></thead>
+        <thead><tr><th>Warehouse</th><th class="num">Current</th><th class="num">Reserved</th><th class="num">Available</th><th>Status</th></tr></thead>
         <tbody>
 ${summaryRows}
         </tbody>
       </table>
     </div>`;
 
-  const approved =
-    product.approvedWarehouseNames.length === 0
-      ? 'None - stock recorded anywhere will be reported as a mismatch'
-      : product.approvedWarehouseNames.join(', ');
-
   return renderRecordPage({
     title: product.name,
     activePath: '/products',
     lede: `Product ${product.sku}.`,
     flash,
-    actions: [
-      { label: 'Edit product', href: href('/products/edit', { sku: product.sku }) },
-      { label: 'Delete product', href: href('/products/delete', { sku: product.sku }), tone: 'danger' },
-      { label: 'Back to products', href: '/products', tone: 'secondary' },
-    ],
+    actions: [{ label: 'Back to products', href: '/products', tone: 'secondary' }],
     rows: [
       {
         label: 'Image',
-        html: `<img class="thumb" src="${escapeHtml(product.image)}" alt="" width="56" height="56">`,
+        html: `<img class="thumb" src="${escapeHtml(product.image)}" alt="" width="56" height="56" loading="lazy">`,
       },
       { label: 'SKU', text: product.sku },
       { label: 'Product name', text: product.name },
-      { label: 'Category', text: product.category },
-      { label: 'Supplier', text: product.supplier },
+      { label: 'Category', text: product.category ?? NOT_IN_SOURCE },
+      { label: 'Supplier', text: product.supplier ?? NOT_IN_SOURCE },
       {
         label: 'Listing status',
         html: product.active
           ? '<span class="pill ok">Active</span>'
           : '<span class="pill neutral">Inactive</span>',
+        derived:
+          product.endOfLineStatus === null || product.endOfLineStatus === undefined
+            ? 'Not flagged end-of-line in the source.'
+            : `End-of-line status in the source: ${product.endOfLineStatus}.`,
       },
       {
         label: 'Units held',
-        text: String(product.unitsHeld),
+        text: number(product.unitsHeld),
         derived: `Across ${stockLines.length} stock line${stockLines.length === 1 ? '' : 's'}. Totalled from the stock data, not stored here.`,
       },
-      { label: 'Units sold (90 days)', text: String(product.unitsSoldLast90Days) },
-      { label: 'Approved warehouses', text: approved },
+      {
+        label: 'Available',
+        text: number(product.available),
+        derived: `${number(product.unitsHeld)} held minus ${number(product.reserved)} reserved, across every warehouse.`,
+      },
+      {
+        label: 'Stock position',
+        html: `<span class="pill ${escapeHtml(statusClass(product.stockStatus))}">${escapeHtml(product.stockStatus)}</span>`,
+        derived: 'The band this SKU is counted in on the dashboard.',
+      },
+      {
+        label: 'Units sold (90 days)',
+        text: number(product.unitsSoldLast90Days),
+        derived: 'Counted from despatched order lines, including this SKU sold inside a bundle.',
+      },
     ],
     extra: `    <h2>Stock held</h2>\n${summary}`,
-  });
-}
-
-/**
- * The add and edit form for a product.
- *
- * @param {object} options
- * @returns {string}
- */
-export function renderProductFormPage({
-  mode,
-  values,
-  errors = {},
-  categories,
-  suppliers,
-  warehouses,
-  listingStatuses,
-  flash = null,
-}) {
-  const editing = mode === 'edit';
-
-  const fields = [
-    editing
-      ? { kind: 'readonly', name: 'sku', label: 'SKU', hint: 'The SKU is the key stock lines, transfers and audit records point at, so it cannot be changed here.' }
-      : { kind: 'text', name: 'sku', label: 'SKU', hint: 'Required, and must not already be in the catalogue.' },
-    { kind: 'text', name: 'name', label: 'Product name' },
-    { kind: 'select', name: 'category', label: 'Category', options: [{ value: '', label: 'Choose a category' }, ...categories.map((c) => ({ value: c, label: c }))] },
-    { kind: 'select', name: 'supplier', label: 'Supplier', options: [{ value: '', label: 'Choose a supplier' }, ...suppliers.map((s) => ({ value: s, label: s }))] },
-    { kind: 'select', name: 'listing', label: 'Listing status', options: listingStatuses.map((s) => ({ value: s, label: s })) },
-    { kind: 'number', name: 'unitsSoldLast90Days', label: 'Units sold (90 days)', hint: 'Used by the slow-moving rule. Zero if it has not sold.' },
-    {
-      kind: 'checkboxes',
-      name: 'approvedWarehouses',
-      label: 'Approved warehouses',
-      options: warehouses.map((warehouse) => ({ value: warehouse.id, label: warehouse.name })),
-      hint: 'Stock recorded anywhere else is reported as a Warehouse/SKU Mismatch.',
-    },
-  ];
-
-  return renderFormPage({
-    title: editing ? `Edit ${values.sku}` : 'Add product',
-    activePath: '/products',
-    lede: editing ? 'Change the catalogue entry for this SKU.' : 'Create a new product in the dummy catalogue.',
-    action: editing ? '/products/edit' : '/products/add',
-    hidden: editing ? { sku: values.sku } : {},
-    fields,
-    values,
-    errors,
-    submitLabel: editing ? 'Save changes' : 'Add product',
-    cancelHref: editing ? href('/products/view', { sku: values.sku }) : '/products',
-    flash,
-  });
-}
-
-/**
- * The confirmation in front of deleting a product.
- *
- * @param {object} options
- * @returns {string}
- */
-export function renderProductDeletePage({ product, references, flash = null }) {
-  const referenced = references.total > 0;
-
-  return renderConfirmPage({
-    title: `Delete ${product.sku}?`,
-    activePath: '/products',
-    lede: 'This cannot be undone within the running session.',
-    flash,
-    warning: referenced
-      ? `${product.sku} is still referenced by ${references.stockLines} stock line(s), ${references.transfers} transfer(s) and ${references.auditCounts} audit record(s). Deleting the product on its own would leave those pointing at a SKU that no longer exists, so they have to go with it.`
-      : 'Nothing else in the system points at this product, so it can be removed on its own.',
-    rows: [
-      { label: 'SKU', text: product.sku },
-      { label: 'Product name', text: product.name },
-      { label: 'Category', text: product.category },
-      { label: 'Supplier', text: product.supplier },
-      { label: 'Stock lines affected', text: String(references.stockLines) },
-      { label: 'Transfers affected', text: String(references.transfers) },
-      { label: 'Audit records affected', text: String(references.auditCounts) },
-    ],
-    action: '/products/delete',
-    hidden: { sku: product.sku },
-    consent: referenced
-      ? {
-          name: 'cascade',
-          label: `Yes - also delete the ${references.total} record(s) that point at ${product.sku}`,
-        }
-      : null,
-    confirmLabel: referenced ? 'Delete product and related records' : 'Delete product',
-    cancelHref: href('/products/view', { sku: product.sku }),
   });
 }
 
@@ -1652,20 +1558,19 @@ export function renderProductDeletePage({ product, references, flash = null }) {
  * @param {object} options
  * @returns {string}
  */
-export function renderStockViewPage({ line, issues, flash = null }) {
+export function renderStockViewPage({ line, issues, threshold = 0, note = '', flash = null }) {
   const issueList =
     issues.length === 0
       ? '    <p class="empty">The rules find nothing wrong with this stock line.</p>'
       : `    <div class="table-scroll">
       <table>
-        <thead><tr><th>Issue</th><th>Why it was raised</th><th>Action status</th></tr></thead>
+        <thead><tr><th>Issue</th><th>Why it was raised</th></tr></thead>
         <tbody>
 ${issues
   .map(
     (issue) => `          <tr>
             <td><span class="pill ${escapeHtml(issueClass(issue.type))}">${escapeHtml(issue.type)}</span></td>
             <td class="reason">${escapeHtml(issue.detail)}</td>
-            <td><span class="pill ${escapeHtml(actionStatusClass(issue.action.status))}">${escapeHtml(issue.action.status)}</span></td>
           </tr>`,
   )
   .join('\n')}
@@ -1673,28 +1578,34 @@ ${issues
       </table>
     </div>`;
 
+  const shelf = [line.shelfLocation, line.bulkLocation].filter(
+    (value) => value && value !== '-',
+  );
+
   return renderRecordPage({
     title: `${line.sku} at ${line.warehouseName}`,
     activePath: '/stock',
     lede: 'One SKU held at one warehouse.',
     flash,
-    actions: [
-      { label: 'Edit stock record', href: href('/stock/edit', { sku: line.sku, warehouse: line.warehouseId }) },
-      { label: 'Delete stock record', href: href('/stock/delete', { sku: line.sku, warehouse: line.warehouseId }), tone: 'danger' },
-      { label: 'Back to stock', href: '/stock', tone: 'secondary' },
-    ],
+    note,
+    actions: [{ label: 'Back to stock', href: '/stock', tone: 'secondary' }],
     rows: [
       { label: 'SKU', text: line.sku },
       { label: 'Product', text: line.productName },
       { label: 'Warehouse', text: line.warehouseName },
-      { label: 'Current / on hand', text: String(line.onHand) },
-      { label: 'Reserved', text: String(line.reserved) },
+      { label: 'Current / on hand', text: number(line.onHand) },
+      { label: 'Reserved', text: number(line.reserved) },
       {
         label: 'Available',
-        html: `<strong>${escapeHtml(String(line.available))}</strong>`,
-        derived: `Calculated as ${line.onHand} on hand minus ${line.reserved} reserved. Never stored, and never entered on a form.`,
+        html: `<strong>${escapeHtml(number(line.available))}</strong>`,
+        derived: `Calculated as ${number(line.onHand)} on hand minus ${number(line.reserved)} reserved. Never stored.`,
       },
-      { label: 'Minimum stock', text: String(line.minimum) },
+      {
+        label: 'Low-stock threshold',
+        text: number(threshold),
+        derived: 'An application setting, not a figure from the source database.',
+      },
+      { label: 'Shelf location', text: shelf.length > 0 ? shelf.join(' / ') : NOT_IN_SOURCE },
       {
         label: 'Status',
         html: `<span class="pill ${escapeHtml(statusClass(line.status))}">${escapeHtml(line.status)}</span>`,
@@ -1702,74 +1613,6 @@ ${issues
       },
     ],
     extra: `    <h2>Issues raised by this line</h2>\n${issueList}`,
-  });
-}
-
-/**
- * The add and edit form for a stock line.
- *
- * There is no Available field, on purpose: it is onHand minus reserved and is
- * derived wherever it is shown.
- *
- * @param {object} options
- * @returns {string}
- */
-export function renderStockFormPage({ mode, values, errors = {}, products, warehouses, flash = null }) {
-  const editing = mode === 'edit';
-
-  const fields = [
-    { kind: 'select', name: 'sku', label: 'SKU', options: skuOptions(products) },
-    { kind: 'select', name: 'warehouseId', label: 'Warehouse', options: warehouseOptions(warehouses) },
-    { kind: 'number', name: 'onHand', label: 'Current / on hand', hint: 'May be below zero: that is what the Negative Inventory rule reports.' },
-    { kind: 'number', name: 'reserved', label: 'Reserved', hint: 'Units already committed to orders. Zero or more.' },
-    { kind: 'number', name: 'minimum', label: 'Minimum stock', hint: 'The level this site is expected to hold. Zero or more.' },
-  ];
-
-  return renderFormPage({
-    title: editing ? `Edit ${values.sku} at ${values.warehouseName ?? values.warehouseId}` : 'Add stock record',
-    activePath: '/stock',
-    lede: editing ? 'Change the stored figures for this stock line.' : 'Record stock for a SKU at a warehouse.',
-    note: 'Available is not on this form. It is always Current minus Reserved, worked out when the figures are shown, so there is no way to save an Available that disagrees with them.',
-    action: editing ? '/stock/edit' : '/stock/add',
-    hidden: editing ? { originalSku: values.sku, originalWarehouse: values.warehouseId } : {},
-    fields,
-    values,
-    errors,
-    submitLabel: editing ? 'Save changes' : 'Add stock record',
-    cancelHref: editing
-      ? href('/stock/view', { sku: values.sku, warehouse: values.warehouseId })
-      : '/stock',
-    flash,
-  });
-}
-
-/**
- * The confirmation in front of deleting a stock line.
- *
- * @param {object} options
- * @returns {string}
- */
-export function renderStockDeletePage({ line, flash = null }) {
-  return renderConfirmPage({
-    title: `Delete stock record for ${line.sku}?`,
-    activePath: '/stock',
-    lede: 'This cannot be undone within the running session.',
-    flash,
-    warning:
-      'Removing this line removes the stock it records. The dashboard counts and the Alerts screen are worked out from the stock data, so both will change as soon as it is gone.',
-    rows: [
-      { label: 'SKU', text: line.sku },
-      { label: 'Product', text: line.productName },
-      { label: 'Warehouse', text: line.warehouseName },
-      { label: 'Current / on hand', text: String(line.onHand) },
-      { label: 'Reserved', text: String(line.reserved) },
-      { label: 'Available', text: String(line.available) },
-      { label: 'Minimum stock', text: String(line.minimum) },
-    ],
-    action: '/stock/delete',
-    hidden: { sku: line.sku, warehouse: line.warehouseId },
-    confirmLabel: 'Delete stock record',
-    cancelHref: href('/stock/view', { sku: line.sku, warehouse: line.warehouseId }),
   });
 }
 
@@ -1782,30 +1625,22 @@ export function renderStockDeletePage({ line, flash = null }) {
  * @returns {string}
  */
 export function renderIssueViewPage({ issue, line, flash = null }) {
-  const key = { type: issue.type, sku: issue.sku, warehouse: issue.warehouseId };
-
-  const resolveForm =
-    issue.action.status === 'Resolved'
-      ? ''
-      : `    <form class="record" method="post" action="/alerts/resolve">
-      <input type="hidden" name="type" value="${escapeHtml(issue.type)}">
-      <input type="hidden" name="sku" value="${escapeHtml(issue.sku)}">
-      <input type="hidden" name="warehouse" value="${escapeHtml(issue.warehouseId)}">
-      <div class="buttons">
-        <button type="submit">Mark as resolved</button>
-      </div>
-    </form>`;
-
   return renderRecordPage({
     title: `${issue.type}: ${issue.sku}`,
     activePath: '/alerts',
     lede: `Detected at ${issue.warehouseName}.`,
     flash,
-    note: 'Marking this resolved records what the team did. It does not change the stock, and it does not stop the rules detecting the problem: if the condition is still there on the next page load, this issue is still raised, still listed and still counted.',
+    note:
+      'This issue is not a record. It is recalculated from the source data every time this page is loaded, so it cannot be dismissed here and it disappears by itself once the stock figures no longer meet the condition.',
     actions: [
-      { label: 'Record an action', href: href('/alerts/edit', key) },
       ...(line
-        ? [{ label: 'Edit the stock line', href: href('/stock/edit', { sku: issue.sku, warehouse: issue.warehouseId }), tone: 'secondary' }]
+        ? [
+            {
+              label: 'View the stock line',
+              href: href('/stock/view', { sku: issue.sku, warehouse: issue.warehouseId }),
+              tone: 'secondary',
+            },
+          ]
         : []),
       { label: 'Back to alerts', href: '/alerts', tone: 'secondary' },
     ],
@@ -1818,58 +1653,14 @@ export function renderIssueViewPage({ issue, line, flash = null }) {
       { label: 'Product', text: issue.productName },
       { label: 'Warehouse', text: issue.warehouseName },
       { label: 'Why it was raised', text: issue.detail },
-      { label: 'On hand', text: String(issue.onHand) },
-      { label: 'Reserved', text: String(issue.reserved) },
+      { label: 'On hand', text: number(issue.onHand) },
+      { label: 'Reserved', text: number(issue.reserved) },
       {
         label: 'Available',
-        text: String(issue.available),
+        text: number(issue.available),
         derived: 'On hand minus reserved.',
       },
-      { label: 'Minimum stock', text: String(issue.minimum) },
-      {
-        label: 'Action status',
-        html: `<span class="pill ${escapeHtml(actionStatusClass(issue.action.status))}">${escapeHtml(issue.action.status)}</span>`,
-      },
-      { label: 'Action note', text: issue.action.note || 'Nothing recorded yet.' },
-      { label: 'Action last updated', text: issue.action.updatedAt ?? 'Never' },
     ],
-    extra: resolveForm,
-  });
-}
-
-/**
- * The form for recording what staff did about an issue.
- *
- * @param {object} options
- * @returns {string}
- */
-export function renderIssueActionPage({ issue, values, errors = {}, actionStatuses, flash = null }) {
-  return renderFormPage({
-    title: `Action: ${issue.type}`,
-    activePath: '/alerts',
-    lede: `${issue.sku} at ${issue.warehouseName}. ${issue.detail}`,
-    note: 'This records what the team did. It cannot clear the underlying problem: the detection rules read the stock figures, not this form, so the only thing that removes the issue from the list is correcting the stock itself.',
-    action: '/alerts/edit',
-    hidden: { type: issue.type, sku: issue.sku, warehouse: issue.warehouseId },
-    fields: [
-      {
-        kind: 'select',
-        name: 'status',
-        label: 'Action status',
-        options: actionStatuses.map((status) => ({ value: status, label: status })),
-      },
-      {
-        kind: 'textarea',
-        name: 'note',
-        label: 'Action note',
-        hint: 'What was done, or what is waiting on what. Optional.',
-      },
-    ],
-    values,
-    errors,
-    submitLabel: 'Save action',
-    cancelHref: href('/alerts/view', { type: issue.type, sku: issue.sku, warehouse: issue.warehouseId }),
-    flash,
   });
 }
 
@@ -1887,10 +1678,8 @@ export function renderTransferViewPage({ transfer, flash = null }) {
     activePath: '/transfers',
     lede: `${transfer.quantity} x ${transfer.sku}.`,
     flash,
-    note: 'Transfers are a record only in this MVP. The quantity below has not been taken off the source warehouse or added to the destination.',
+    note: 'Read from the source database. Nothing on this page can be changed here.',
     actions: [
-      { label: 'Edit transfer', href: href('/transfers/edit', { id: transfer.id }) },
-      { label: 'Delete transfer', href: href('/transfers/delete', { id: transfer.id }), tone: 'danger' },
       { label: 'Back to transfers', href: '/transfers', tone: 'secondary' },
     ],
     rows: [
@@ -1899,85 +1688,13 @@ export function renderTransferViewPage({ transfer, flash = null }) {
       { label: 'Product', text: transfer.productName },
       { label: 'From', text: transfer.fromWarehouseName },
       { label: 'To', text: transfer.toWarehouseName },
-      { label: 'Quantity', text: String(transfer.quantity) },
+      { label: 'Quantity', text: number(transfer.quantity) },
       {
         label: 'Status',
         html: `<span class="pill ${escapeHtml(transferStatusClass(transfer.status))}">${escapeHtml(transfer.status)}</span>`,
       },
       { label: 'Raised on', text: transfer.raisedOn },
     ],
-  });
-}
-
-/**
- * The add and edit form for a transfer.
- *
- * @param {object} options
- * @returns {string}
- */
-export function renderTransferFormPage({
-  mode,
-  values,
-  errors = {},
-  products,
-  warehouses,
-  statuses,
-  flash = null,
-}) {
-  const editing = mode === 'edit';
-
-  const fields = [
-    ...(editing ? [{ kind: 'readonly', name: 'id', label: 'Transfer ID' }] : []),
-    { kind: 'select', name: 'sku', label: 'SKU', options: skuOptions(products) },
-    { kind: 'select', name: 'fromWarehouseId', label: 'From warehouse', options: warehouseOptions(warehouses, 'Choose a source') },
-    { kind: 'select', name: 'toWarehouseId', label: 'To warehouse', options: warehouseOptions(warehouses, 'Choose a destination') },
-    { kind: 'number', name: 'quantity', label: 'Quantity', hint: 'Must be greater than zero.' },
-    { kind: 'select', name: 'status', label: 'Status', options: statuses.map((s) => ({ value: s, label: s })) },
-    { kind: 'date', name: 'raisedOn', label: 'Raised on' },
-  ];
-
-  return renderFormPage({
-    title: editing ? `Edit transfer ${values.id}` : 'Add transfer',
-    activePath: '/transfers',
-    lede: editing ? 'Change this transfer, including its status.' : 'Raise a dummy transfer between two warehouses.',
-    note: 'Saving this does not move any stock. Transfers are tracked only.',
-    action: editing ? '/transfers/edit' : '/transfers/add',
-    hidden: editing ? { id: values.id } : {},
-    fields,
-    values,
-    errors,
-    submitLabel: editing ? 'Save changes' : 'Add transfer',
-    cancelHref: editing ? href('/transfers/view', { id: values.id }) : '/transfers',
-    flash,
-  });
-}
-
-/**
- * The confirmation in front of deleting a transfer.
- *
- * @param {object} options
- * @returns {string}
- */
-export function renderTransferDeletePage({ transfer, flash = null }) {
-  return renderConfirmPage({
-    title: `Delete transfer ${transfer.id}?`,
-    activePath: '/transfers',
-    lede: 'This cannot be undone within the running session.',
-    flash,
-    warning: 'The transfer record will be removed. No stock figures change, because transfers do not move stock in this MVP.',
-    rows: [
-      { label: 'Transfer ID', text: transfer.id },
-      { label: 'SKU', text: transfer.sku },
-      { label: 'Product', text: transfer.productName },
-      { label: 'From', text: transfer.fromWarehouseName },
-      { label: 'To', text: transfer.toWarehouseName },
-      { label: 'Quantity', text: String(transfer.quantity) },
-      { label: 'Status', text: transfer.status },
-    ],
-    action: '/transfers/delete',
-    hidden: { id: transfer.id },
-    confirmLabel: 'Delete transfer',
-    cancelHref: href('/transfers/view', { id: transfer.id }),
   });
 }
 
@@ -1996,8 +1713,6 @@ export function renderAuditViewPage({ row, flash = null }) {
     lede: `${row.sku} counted at ${row.warehouseName}.`,
     flash,
     actions: [
-      { label: 'Edit audit record', href: href('/audit/edit', { id: row.id }) },
-      { label: 'Delete audit record', href: href('/audit/delete', { id: row.id }), tone: 'danger' },
       { label: 'Back to audit', href: '/audit', tone: 'secondary' },
     ],
     rows: [
@@ -2005,14 +1720,14 @@ export function renderAuditViewPage({ row, flash = null }) {
       { label: 'SKU', text: row.sku },
       { label: 'Product', text: row.productName },
       { label: 'Warehouse', text: row.warehouseName },
-      { label: 'System quantity', text: String(row.systemQuantity) },
-      { label: 'Counted quantity', text: String(row.countedQuantity) },
+      { label: 'System quantity', text: number(row.systemQuantity) },
+      { label: 'Counted quantity', text: number(row.countedQuantity) },
       {
         label: 'Difference',
         html: row.matches
           ? '<span class="muted">0</span>'
           : `<span class="${row.difference > 0 ? 'pos' : 'neg'}">${escapeHtml(formatDifference(row.difference))}</span>`,
-        derived: `Calculated as ${row.countedQuantity} counted minus ${row.systemQuantity} system. Never stored, and never entered on a form.`,
+        derived: `Calculated as ${number(row.countedQuantity)} counted minus ${number(row.systemQuantity)} system. Never stored.`,
       },
       {
         label: 'Result',
@@ -2023,78 +1738,6 @@ export function renderAuditViewPage({ row, flash = null }) {
       { label: 'Counted on', text: row.countedOn },
       { label: 'Counted by', text: row.countedBy },
     ],
-  });
-}
-
-/**
- * The add and edit form for an audit count.
- *
- * There is no Difference field: it is counted minus system, worked out wherever
- * it is shown.
- *
- * @param {object} options
- * @returns {string}
- */
-export function renderAuditFormPage({ mode, values, errors = {}, products, warehouses, flash = null }) {
-  const editing = mode === 'edit';
-
-  const fields = [
-    ...(editing ? [{ kind: 'readonly', name: 'id', label: 'Audit ID' }] : []),
-    { kind: 'select', name: 'sku', label: 'SKU', options: skuOptions(products) },
-    { kind: 'select', name: 'warehouseId', label: 'Warehouse', options: warehouseOptions(warehouses) },
-    {
-      kind: 'number',
-      name: 'systemQuantity',
-      label: 'System quantity',
-      hint: 'What the system believed was on hand when the count was taken. An audit records a moment, so this is stored rather than looked up live.',
-    },
-    { kind: 'number', name: 'countedQuantity', label: 'Counted / physical quantity', hint: 'What was actually found on the shelf. Zero or more.' },
-    { kind: 'date', name: 'countedOn', label: 'Counted on' },
-    { kind: 'text', name: 'countedBy', label: 'Counted by', hint: 'Initials of whoever took the count.' },
-  ];
-
-  return renderFormPage({
-    title: editing ? `Edit audit ${values.id}` : 'Add audit record',
-    activePath: '/audit',
-    lede: editing ? 'Change the counted figures. The difference follows.' : 'Record a physical count against what the system expected.',
-    note: 'There is no Difference field. It is always Counted minus System, worked out when the figures are shown, so a stored difference can never disagree with them.',
-    action: editing ? '/audit/edit' : '/audit/add',
-    hidden: editing ? { id: values.id } : {},
-    fields,
-    values,
-    errors,
-    submitLabel: editing ? 'Save changes' : 'Add audit record',
-    cancelHref: editing ? href('/audit/view', { id: values.id }) : '/audit',
-    flash,
-  });
-}
-
-/**
- * The confirmation in front of deleting an audit count.
- *
- * @param {object} options
- * @returns {string}
- */
-export function renderAuditDeletePage({ row, flash = null }) {
-  return renderConfirmPage({
-    title: `Delete audit ${row.id}?`,
-    activePath: '/audit',
-    lede: 'This cannot be undone within the running session.',
-    flash,
-    warning:
-      'The count will be removed. The Discrepancies figure on the dashboard is worked out from the audit records, so it will change if this count disagreed.',
-    rows: [
-      { label: 'Audit ID', text: row.id },
-      { label: 'SKU', text: row.sku },
-      { label: 'Warehouse', text: row.warehouseName },
-      { label: 'System quantity', text: String(row.systemQuantity) },
-      { label: 'Counted quantity', text: String(row.countedQuantity) },
-      { label: 'Difference', text: formatDifference(row.difference) },
-    ],
-    action: '/audit/delete',
-    hidden: { id: row.id },
-    confirmLabel: 'Delete audit record',
-    cancelHref: href('/audit/view', { id: row.id }),
   });
 }
 
@@ -2113,6 +1756,28 @@ export function renderNotFoundPage() {
     activePath: '',
     lede: '',
     body: '    <p class="empty">That page does not exist. Use the navigation above to pick one of the six areas.</p>',
+  });
+}
+
+/**
+ * The answer to anything that tries to change something.
+ *
+ * There is no form in this application and no route that accepts a submission,
+ * so this is only reached by an old bookmark or a hand-made request. It says
+ * what is actually true - the data belongs to another system and this one only
+ * reports on it - rather than a bare error.
+ *
+ * @returns {string}
+ */
+export function renderReadOnlyPage() {
+  return layout({
+    title: 'Read-only',
+    activePath: '',
+    lede: '',
+    body:
+      '    <p class="empty">This system reports on the inventory database; it does not change it. ' +
+      'Stock, products, transfers and counts are maintained in the source system, and appear here ' +
+      'as soon as they change there.</p>',
   });
 }
 

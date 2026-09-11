@@ -1,5 +1,5 @@
 /**
- * Warehouses held in the dummy dataset.
+ * Warehouses held in the test dataset.
  *
  * Every record here is invented. No real site, address or company appears in
  * this file, and none of it comes from a live inventory system.

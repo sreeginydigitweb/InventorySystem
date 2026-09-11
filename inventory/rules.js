@@ -1,10 +1,10 @@
 /**
  * The inventory detection rules.
  *
- * This module is the whole of the business logic. It owns no HTML and no
- * routing, and it reads nothing but the dummy dataset. Every rule is a small
- * named function so that the rule can be read directly rather than inferred
- * from the code around it.
+ * This module is the whole of the business logic. It owns no HTML, no routing
+ * and no data access: every rule is a pure function of the rows it is handed.
+ * Each is a small named function so that the rule can be read directly rather
+ * than inferred from the code around it.
  *
  * ---------------------------------------------------------------------------
  * AVAILABLE STOCK
@@ -30,7 +30,7 @@
  *                         moved in the last 90 days.
  *
  * ---------------------------------------------------------------------------
- * TWO DELIBERATE CHOICES, STATED HERE RATHER THAN HIDDEN IN THE CODE
+ * THREE DELIBERATE CHOICES, STATED HERE RATHER THAN HIDDEN IN THE CODE
  *
  * 1. Low Stock and Out of Stock are mutually exclusive. Taken completely
  *    literally, a line with nothing available is also "below minimum" and would
@@ -41,13 +41,29 @@
  * 2. Slow-Moving requires the product to still be active. Stock sitting against
  *    a withdrawn listing is already reported as an Inactive Listing; reporting
  *    it a second time as slow-moving would add noise, not information.
+ *
+ * 3. Two of these rules have an input the source database does not hold, and
+ *    each says so rather than guessing:
+ *
+ *    - The source has no minimum or reorder level for a SKU at a site. Rather
+ *      than invent one per product, Low Stock is judged against a single
+ *      application-wide threshold, LOW_STOCK_THRESHOLD, stated once below and
+ *      printed on the screens that use it. A line may still carry its own
+ *      `minimum`, and one that does is judged against that instead.
+ *
+ *    - The source has no list of which sites a SKU is approved to be held at.
+ *      A product whose `approvedWarehouses` is null is not checked for that,
+ *      because checking against a list nobody keeps would report every line in
+ *      the business as misplaced. The two faults that CAN be seen in the real
+ *      data - a warehouse that does not exist, and a SKU that is not in the
+ *      catalogue - are still detected.
  */
 
 /**
  * The catalogue a rule is judged against.
  *
  * Three of the six rules need to know what a SKU and a warehouse ARE, not just
- * what the stock line says. That used to be a hidden import of the dummy data;
+ * what the stock line says. That used to be a hidden import of the test data;
  * now the rows come from the database, so it is passed in explicitly. The rules
  * stay pure functions of what they are handed - which is also why they can be
  * tested without a database.
@@ -80,6 +96,52 @@ export const EMPTY_CATALOGUE = makeCatalogue([], []);
  * slow-moving. A single threshold, stated once.
  */
 export const SLOW_MOVING_THRESHOLD = 5;
+
+/**
+ * Available stock at or below which a line counts as running low, used when the
+ * line itself carries no minimum.
+ *
+ * THIS IS AN APPLICATION SETTING, NOT A FIGURE FROM THE SOURCE DATABASE. The
+ * source holds no minimum or reorder level for a SKU at a site - there is no
+ * such column anywhere in it - so there is nothing to read. The choice is
+ * between dropping the rule and stating a threshold; a threshold stated once,
+ * in one place, and printed on the screens it governs is the more useful of the
+ * two, and it is honest as long as it is never presented as the business's own
+ * number. Change it here and every screen follows.
+ */
+export const LOW_STOCK_THRESHOLD = 10;
+
+/**
+ * The highest available figure that still counts as low.
+ *
+ * Two cases, and they differ by one on purpose:
+ *
+ *   - A row carrying its own `minimum` is the level that site is expected to
+ *     HOLD, so sitting exactly on it is not low: the test is
+ *     `available < minimum`, which is `available <= minimum - 1`.
+ *
+ *   - With no minimum - which is every row from the source database, because
+ *     it has no such column - the test is the agreed application threshold,
+ *     INCLUSIVE: `available > 0 AND available <= LOW_STOCK_THRESHOLD`.
+ *
+ * Both are expressed as one ceiling so there is a single comparison below.
+ *
+ * @param {{minimum?: number}} line
+ * @returns {number}
+ */
+export function lowStockCeiling(line) {
+  return typeof line.minimum === 'number' ? line.minimum - 1 : LOW_STOCK_THRESHOLD;
+}
+
+/**
+ * The minimum shown against a line, for display only.
+ *
+ * @param {{minimum?: number}} line
+ * @returns {number}
+ */
+export function minimumFor(line) {
+  return typeof line.minimum === 'number' ? line.minimum : LOW_STOCK_THRESHOLD;
+}
 
 /** The health bands a stock line can fall into. Exactly one applies to a line. */
 export const STOCK_STATUS = Object.freeze({
@@ -144,7 +206,7 @@ export function isOutOfStock(line) {
  */
 export function isLowStock(line) {
   const available = availableStock(line);
-  return available > 0 && available < line.minimum;
+  return available > 0 && available <= lowStockCeiling(line);
 }
 
 /**
@@ -186,7 +248,11 @@ export function warehouseMismatchReason(line, catalogue) {
     return `SKU ${line.sku} is not in the product catalogue`;
   }
 
-  if (!product.approvedWarehouses.includes(line.warehouseId)) {
+  // Null means the source keeps no approval list. Checking a real SKU at a real
+  // site against a list nobody maintains would report the entire business as
+  // misplaced stock, so the check is skipped rather than failed. See choice 3
+  // in the header.
+  if (product.approvedWarehouses && !product.approvedWarehouses.includes(line.warehouseId)) {
     return `${line.sku} is not approved to be held at ${warehouse.name}`;
   }
 
@@ -239,8 +305,56 @@ export function describeStockLine(line) {
   return {
     ...line,
     available: availableStock(line),
+    minimum: minimumFor(line),
     status: stockStatus(line),
   };
+}
+
+/**
+ * The whole-business position for ONE SKU: its stock summed across every
+ * warehouse it is held at, then banded by the same four rules a single line is.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS, AND WHY IT IS NOT A COUNT OF LINES
+ *
+ * A stock line is one SKU at one warehouse. The catalogue is 6,510 SKUs and
+ * they are spread over 68,237 lines, so "how many are healthy?" has two
+ * completely different answers depending on which you count - and the two are
+ * not interchangeable:
+ *
+ *   counting LINES  answers "how many SKU/warehouse records are healthy",
+ *                   which is dominated by the fact that most SKUs have a row at
+ *                   all ten sites and hold nothing at most of them.
+ *   counting SKUs   answers "how many products can we actually sell", which is
+ *                   the question the dashboard is asked.
+ *
+ * The dashboard counts SKUs, so that all six cards are the same unit as Total
+ * SKUs and the four bands add up to the catalogue exactly.
+ *
+ * Summed, not worst-of: a product with 12 units at one site and none at the
+ * other nine can be sold, and reporting it as out of stock because one shelf is
+ * empty would be wrong. Reserved is summed too, so committed stock does not
+ * count as cover anywhere.
+ *
+ * The aggregate deliberately carries no `minimum`: a minimum belongs to a site,
+ * and there is no such thing as the minimum of ten sites at once. So the band
+ * is judged against the application threshold, which is also the only thing the
+ * source database could ever support.
+ *
+ * @param {string} sku
+ * @param {readonly object[]} lines  Every stock line for that SKU. May be empty.
+ * @returns {object}
+ */
+export function describeSkuPosition(sku, lines) {
+  let onHand = 0;
+  let reserved = 0;
+
+  for (const line of lines) {
+    onHand += line.onHand;
+    reserved += line.reserved;
+  }
+
+  return describeStockLine({ sku, onHand, reserved, warehouseCount: lines.length });
 }
 
 /**
@@ -268,7 +382,7 @@ export function detectIssues(lines, catalogue) {
         onHand: line.onHand,
         reserved: line.reserved,
         available,
-        minimum: line.minimum,
+        minimum: minimumFor(line),
         detail,
       });
     };
@@ -289,7 +403,7 @@ export function detectIssues(lines, catalogue) {
     }
 
     if (isLowStock(line)) {
-      raise('Low Stock', `${available} available against a minimum of ${line.minimum}`);
+      raise('Low Stock', `${available} available against a minimum of ${minimumFor(line)}`);
     }
 
     const mismatch = warehouseMismatchReason(line, catalogue);

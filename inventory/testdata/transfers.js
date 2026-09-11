@@ -1,5 +1,5 @@
 /**
- * Stock transfers between warehouses, for the dummy dataset.
+ * Stock transfers between warehouses, for the test dataset.
  *
  * All transfers are invented. Every one of the three statuses appears, so all
  * of them can be seen on screen as soon as the system starts.

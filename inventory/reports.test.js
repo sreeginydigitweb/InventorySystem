@@ -3,7 +3,7 @@
  * the transfer counts and the per-screen row sets.
  *
  * The dashboard tests deliberately assert the counts twice - once as a fixed
- * number, so a change to the dummy data cannot pass unnoticed, and once against
+ * number, so a change to the test data cannot pass unnoticed, and once against
  * the underlying rows, so the tiles are proven to agree with the screens they
  * link to.
  *
@@ -24,19 +24,33 @@ import {
   transfersReport,
   unknownSkus,
 } from './reports.js';
-import { AUDIT_COUNTS } from './fixture/audit.js';
-import { PRODUCTS } from './fixture/products.js';
-import { STOCK_LINES } from './fixture/stock.js';
-import { TRANSFERS, TRANSFER_STATUSES } from './fixture/transfers.js';
+import { AUDIT_COUNTS } from './testdata/audit.js';
+import { PRODUCTS } from './testdata/products.js';
+import { STOCK_LINES } from './testdata/stock.js';
+import { TRANSFERS, TRANSFER_STATUSES } from './testdata/transfers.js';
 import { STOCK_STATUS } from './rules.js';
-import { closePool } from './db.js';
-import { resetToFixture } from './fixture/load.js';
 
-// The reports read the database, so the tables start from the seeded dataset
-// these expectations were written against, and the pool is closed at the end so
-// the run does not hang on an open connection.
-before(resetToFixture);
-after(closePool);
+import { WAREHOUSES } from './testdata/warehouses.js';
+import { memorySource, useSource } from './store.js';
+
+// The reports read whatever the store's source hands them. That source is
+// pointed at the sample arrays in ./testdata for the whole of this file, so no
+// test here opens a connection to the business database - not even to read it -
+// and the expectations below are about a dataset that cannot change underneath
+// them.
+before(() =>
+  useSource(
+    memorySource({
+      products: PRODUCTS,
+      warehouses: WAREHOUSES,
+      stockLines: STOCK_LINES,
+      transfers: TRANSFERS,
+      auditCounts: AUDIT_COUNTS,
+    }),
+  ),
+);
+
+after(() => useSource());
 
 describe('auditReport', () => {
   test('difference is counted minus system', async () => {
@@ -71,7 +85,7 @@ describe('auditReport', () => {
     assert.equal(row.difference, 6);
   });
 
-  test('the dummy data shows both outcomes', async () => {
+  test('the test data shows both outcomes', async () => {
     const rows = await auditReport();
     assert.ok(rows.some((row) => row.matches), 'no audit line agrees');
     assert.ok(rows.some((row) => !row.matches), 'no audit line disagrees');
@@ -107,43 +121,67 @@ describe('dashboardMetrics', () => {
     assert.equal(metrics.totalSkus, PRODUCTS.length);
   });
 
-  test('healthy stock matches the stock rows in that band', async () => {
-    assert.equal(metrics.healthyStock, 22);
-    assert.equal(
-      metrics.healthyStock,
-      (await stockReport()).filter((line) => line.status === STOCK_STATUS.HEALTHY).length,
-    );
+  /*
+   * The four stock cards count CATALOGUE SKUs, banded on the SKU's stock summed
+   * across every warehouse - not stock lines. Each case below asserts the same
+   * thing twice: once as a fixed number, so a change to the sample data cannot
+   * pass unnoticed, and once against the per-SKU band the products report
+   * carries, so the card is proven to agree with the screen it links to.
+   */
+  const bandedSkus = async (band) =>
+    (await productsReport()).filter((product) => product.stockStatus === band).length;
+
+  test('healthy stock counts SKUs in that band, not stock lines', async () => {
+    assert.equal(metrics.healthyStock, 13);
+    assert.equal(metrics.healthyStock, await bandedSkus(STOCK_STATUS.HEALTHY));
+
+    // The bug this replaced: counting lines gave a figure LARGER than the
+    // catalogue it is a subset of, because a SKU has a row per warehouse.
+    const healthyLines = (await stockReport()).filter(
+      (line) => line.status === STOCK_STATUS.HEALTHY,
+    ).length;
+    assert.notEqual(metrics.healthyStock, healthyLines, 'the card is counting lines again');
+    assert.ok(metrics.healthyStock <= metrics.totalSkus, 'more healthy SKUs than SKUs');
   });
 
-  test('low stock matches the stock rows in that band', async () => {
-    assert.equal(metrics.lowStock, 5);
-    assert.equal(
-      metrics.lowStock,
-      (await stockReport()).filter((line) => line.status === STOCK_STATUS.LOW).length,
-    );
+  test('low stock counts SKUs in that band', async () => {
+    assert.equal(metrics.lowStock, 0);
+    assert.equal(metrics.lowStock, await bandedSkus(STOCK_STATUS.LOW));
   });
 
-  test('out of stock matches the stock rows in that band', async () => {
-    assert.equal(metrics.outOfStock, 4);
-    assert.equal(
-      metrics.outOfStock,
-      (await stockReport()).filter((line) => line.status === STOCK_STATUS.OUT).length,
-    );
+  test('out of stock counts SKUs in that band', async () => {
+    assert.equal(metrics.outOfStock, 1);
+    assert.equal(metrics.outOfStock, await bandedSkus(STOCK_STATUS.OUT));
   });
 
-  test('negative inventory matches the stock rows in that band', async () => {
-    assert.equal(metrics.negativeInventory, 1);
-    assert.equal(
-      metrics.negativeInventory,
-      (await stockReport()).filter((line) => line.status === STOCK_STATUS.NEGATIVE).length,
-    );
+  test('negative inventory counts SKUs in that band', async () => {
+    assert.equal(metrics.negativeInventory, 0);
+    assert.equal(metrics.negativeInventory, await bandedSkus(STOCK_STATUS.NEGATIVE));
   });
 
-  test('the four stock figures add up to every stock line, with none double counted', async () => {
+  test('the four stock figures add up to the catalogue, with none double counted', async () => {
     const total =
       metrics.healthyStock + metrics.lowStock + metrics.outOfStock + metrics.negativeInventory;
-    assert.equal(total, metrics.totalStockLines);
-    assert.equal(total, STOCK_LINES.length);
+
+    // The invariant that makes the six cards comparable with one another:
+    // every SKU falls into exactly one band, so the four add up to Total SKUs.
+    assert.equal(total, metrics.totalSkus);
+    assert.equal(total, PRODUCTS.length);
+  });
+
+  test('every card is a count of SKUs, so none can exceed the catalogue', async () => {
+    for (const [name, value] of Object.entries({
+      healthyStock: metrics.healthyStock,
+      lowStock: metrics.lowStock,
+      outOfStock: metrics.outOfStock,
+      negativeInventory: metrics.negativeInventory,
+    })) {
+      assert.ok(value <= metrics.totalSkus, `${name} (${value}) exceeds ${metrics.totalSkus} SKUs`);
+    }
+
+    // Stock lines still outnumber SKUs in the sample data, so this test would
+    // have caught the old behaviour.
+    assert.ok(metrics.totalStockLines > metrics.totalSkus);
   });
 
   test('discrepancies matches the audit lines that disagree', async () => {
@@ -168,9 +206,9 @@ describe('issueCounts', () => {
     assert.equal(total, (await issuesReport()).length);
   });
 
-  test('every type is demonstrated by the dummy data', async () => {
+  test('every type is demonstrated by the test data', async () => {
     for (const row of await issueCounts()) {
-      assert.ok(row.count > 0, `no ${row.type} in the dummy data`);
+      assert.ok(row.count > 0, `no ${row.type} in the test data`);
     }
   });
 });

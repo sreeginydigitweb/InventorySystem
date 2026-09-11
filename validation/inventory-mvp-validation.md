@@ -1,219 +1,219 @@
-# Smart Inventory Control MVP - validation
+# Smart Inventory Control - validation
 
-What was checked, how, and what was found. Carried out 2026-09-10 against the
-working tree at commit `2c46830` (the MVP itself is uncommitted at the time of
-validation).
+What was checked, how, and what was found. Carried out **2026-09-11** against
+the working tree, after the system was connected to the live `ledsone` database
+and made read-only.
 
 Supporting output is in `evidence/inventory-mvp-evidence.md`.
 
+This record describes the system as it stands. Everything below was checked
+against the live `ledsone` database on the date above.
+
+## What the system is now
+
+| | |
+| --- | --- |
+| Source database | `ledsone` (existing business database) |
+| Catalogue | `inventory.products WHERE inventory_bool = true` |
+| Catalogue size | **6,510 SKUs** |
+| Stock lines | 68,237 across 10 warehouses |
+| Application writes | **None** |
+
 ## What was validated, and how
 
-Three independent methods were used, deliberately, so that a mistake in the
-implementation could not validate itself:
+Four independent methods, so that a mistake in the implementation could not
+validate itself:
 
-1. **Automated tests** - `npm test`, covering the rules, the reports, the
-   dataset and every route.
-2. **Independent recomputation** - every dashboard figure recalculated straight
-   from the raw data files, without importing `rules.js` or `reports.js`, then
-   compared against what the application produces.
-3. **Live HTTP verification** - the server started with `npm start` and every
-   route, filter, image and link requested over HTTP.
+1. **Automated tests** — `npm test`, covering the rules, the reports, the
+   rendering and every route.
+2. **Independent recomputation in SQL** — every dashboard figure recalculated
+   directly against `ledsone` with SQL that shares no code with the application,
+   then compared against what the application produces.
+3. **Live HTTP verification** — the server started, every route requested, and
+   every link on all six screens crawled.
+4. **Privilege and statement inspection** — what the application *could* do to
+   the source, asked of PostgreSQL rather than assumed from the code.
 
 ## Results
 
-### 1. The six MVP areas
+### 1. The six areas
 
 | Area | Result | Basis |
 | --- | --- | --- |
-| Dashboard | PASS | All six required figures present; each matches the independent recomputation |
-| Products | PASS | SKU, image, name, category and supplier confirmed rendered for all 14 products |
-| Warehouse Stock | PASS | Current, reserved, available and minimum rendered for all 32 lines |
-| Alerts / Issues | PASS | All six issue types appear, each naming SKU, warehouse and a reason |
-| Transfers | PASS | All 8 transfers render; Pending, In Transit and Received all present |
-| Inventory Audit | PASS | System, counted and difference rendered for all 10 lines |
+| Dashboard | PASS | All six cards present; each matches the independent SQL recomputation exactly |
+| Products | PASS | Real SKUs, names, images, categories and suppliers rendered from `ledsone` |
+| Warehouse Stock | PASS | Real Current, Reserved and Available for 68,237 lines across the 10 real warehouses |
+| Alerts / Issues | PASS | All six issue types calculated from real stock, product and warehouse data |
+| Transfers | PASS (empty) | `ledsone` holds no transfer records; screen is empty and states why |
+| Inventory Audit | PASS (empty) | `ledsone` holds no stock counts; screen is empty and states why |
 
-### 2. Derived figures checked against the rendered page
+### 2. Dashboard figures against independent SQL recomputation
 
-Rather than trusting the code, the HTML was parsed back and each row recomputed:
+The application's six figures, and the same figures computed straight from
+`ledsone` with SQL that imports none of the application's code:
 
-- **32 of 32** stock rows: rendered `Available` equals `Current - Reserved`.
-- **10 of 10** audit rows: rendered `Difference` equals `Counted - System`.
-
-### 3. Dashboard figures against independent recomputation
-
-| Figure | Application | Recomputed from raw data | Result |
+| Card | Application | Independent SQL | Result |
 | --- | --- | --- | --- |
-| Total SKUs | 14 | 14 | Match |
-| Healthy Stock | 22 | 22 | Match |
-| Low Stock | 5 | 5 | Match |
-| Out-of-Stock Items | 4 | 4 | Match |
-| Discrepancies | 5 | 5 | Match |
-| Pending Transfers | 3 | 3 | Match |
+| Total SKUs | 6,510 | 6,510 | MATCH |
+| Healthy Stock | 4,010 | 4,010 | MATCH |
+| Low Stock | 561 | 561 | MATCH |
+| Out-of-Stock Items | 1,379 | 1,379 | MATCH |
+| Discrepancies | 0 | 0 (no source data) | MATCH |
+| Pending Transfers | 0 | 0 (no source data) | MATCH |
 
-The four health bands sum to 22 + 5 + 4 + 1 = 32, which is every stock line,
-with none counted twice.
+Negative Inventory, which has no card, is 560 in both.
 
-### 4. Dummy data conditions
+**The invariant holds:** `4,010 + 561 + 1,379 + 560 = 6,510`. Every SKU falls
+into exactly one band, so the four stock bands add up to Total SKUs.
 
-Every condition the MVP has to demonstrate was confirmed present:
+### 3. A counting-scope defect was found and fixed
 
-| Condition | Found |
+Before this round, the three stock cards counted **stock lines**, not SKUs.
+Healthy Stock read **6,791** — larger than the 6,510-SKU catalogue it is
+supposedly a subset of, because most SKUs carry a row at all ten warehouses.
+Traced to `dashboardMetrics()` banding `snap.stockLines` (68,237 rows) rather
+than the catalogue, and confirmed against SQL: 6,791 is exactly the count of
+healthy stock lines.
+
+Fixed by banding each SKU on its stock **summed across every warehouse**
+(`describeSkuPosition` in `rules.js`) — summed rather than worst-of, because a
+product with stock at one site and none at nine others can still be sold. The
+cards now drill through to `/products?stock=…`, which lists the same SKUs and
+shows the same figure.
+
+Regression cover added: a card can never exceed Total SKUs, the four bands must
+sum to Total SKUs, and each card's figure must equal the count line of the
+screen it opens.
+
+### 4. The Low Stock threshold was corrected to be inclusive
+
+The agreed definition is `available > 0 AND available <= 10`. The implementation
+tested `available < 10`, excluding exactly 10. Corrected in `lowStockCeiling()`.
+Effect on the live data: Low Stock rises from 1,159 to **1,289 stock lines**.
+
+### 5. Derived figures checked against the rendered page
+
+The HTML was parsed back and each row recomputed, rather than trusting the code:
+
+- **600 of 600** rendered stock rows across three screens: `Available` equals
+  `Current − Reserved`. Zero mismatches.
+- Spot-checked against the source: SKU `12AT60` at UK Unit3 renders −2 / 0 / −2,
+  Negative Inventory; SQL returns `quantity = -2, reserved_quantity = 0` for
+  that pair. All ten of its warehouse rows agree.
+
+### 6. Live application
+
+| Check | Result |
 | --- | --- |
-| Healthy stock | 22 lines |
-| Low stock | 5 lines |
-| Out of stock | 4 lines |
-| Negative inventory | 1 line |
-| Warehouse/SKU mismatch | 3 lines - one unknown warehouse, one unknown SKU, one unapproved site |
-| Inactive listing holding stock | 4 lines |
-| Slow-moving stock | 3 lines |
-| Over-reserved line | 1 line |
-| Pending / In Transit / Received transfers | 3 / 3 / 2 |
-| Audit discrepancy / audit match | 5 / 5 |
+| `/`, `/products`, `/stock`, `/alerts`, `/transfers`, `/audit` | All HTTP 200 |
+| Every link on all six screens crawled (619 unique URLs) | **0 broken** |
+| Unknown path | HTTP 404, inside the normal page shell |
+| `POST` to `/products/add`, `/stock/edit`, `/audit/delete`, `/alerts/resolve` | HTTP 405 with the read-only explanation; no redirect, nothing written |
+| Every screen is **view only** — Products, Warehouse Stock, Alerts, Transfers, Audit | **0** forms with `method="post"` and **0** links to `/add`, `/edit`, `/delete` or `/resolve` across all six screens. The one form per list screen is the `GET` filter bar. |
+| Runtime errors in the server log | None |
+| Startup banner | `reading ledsone as varmen_user - read-only connection: yes, no write privileges.` |
 
-### 5. Live application
+### 7. A link defect was found by the crawl and fixed
 
-Server started, all six routes returned HTTP 200, all filters returned the
-expected subsets, all thumbnails returned `image/svg+xml`, and **49 links across
-the six screens were followed with zero broken**. The server log contained only
-its two startup lines - no runtime errors. The server was then stopped and the
-port confirmed closed.
+The first crawl returned 11 broken links, all for SKU `" FWS444BL"`. Seven SKUs
+in `ledsone` carry a leading or trailing space — `" FWS444BL"`, `"CGSPBM "`,
+`"IMWW "`, `"RBLSDO300BI  "`, `"RBLSWG135YB "`, `"WSLFS1002BM  "`, `"CGSPWH "`.
+The router trimmed every query parameter, so the href built from the real SKU was
+trimmed back to something matching nothing and each of those products 404'd from
+its own View link.
 
-### 6. Repository standard
+Fixed by comparing record identifiers exactly (`key()`) and trimming only
+human-typed filter text (`param()`). Re-crawl: 619 links, 0 broken. Regression
+test added for a padded SKU on both the product and stock view routes.
 
-All 12 standard folders and their `README.md` files remain present and
-**byte-identical** to the canonical `Initial-Mini-AIOS` originals - none were
-modified. Neither sibling repository was touched.
+### 8. Source database safety
+
+Asked of PostgreSQL, not inferred from the code:
+
+| Check | Result |
+| --- | --- |
+| `has_table_privilege('varmen_user','inventory.products','INSERT')` | **false** |
+| `…'UPDATE'` / `…'DELETE'` | **false** / **false** |
+| `has_table_privilege('varmen_user','inventory.physical_product_stock','UPDATE')` | **false** |
+| `has_schema_privilege('varmen_user','inventory','CREATE')` | **false** |
+| `has_database_privilege('varmen_user','ledsone','CREATE')` | **false** |
+| Connection `transaction_read_only` | **on** (set as a startup option) |
+| Schemas named `inventory_control*` in `ledsone` | **0** |
+| Write SQL anywhere in `inventory/*.js` | **none** (only the word in comments) |
+| `inventory.physical_product_stock` row count, before and after | 76,683 → 76,683 |
+| `inventory.warehouse` row count | 10 → 10 |
+| Catalogue (`inventory_bool = true`) | 6,510 → 6,510 |
+
+No INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, TRUNCATE, migration or seed was
+executed against `ledsone` at any point.
+
+`inventory.products` moved from 44,492 to 44,494 during the session. **Not this
+application** — it holds no INSERT privilege, the connection is read-only, and
+there is no INSERT statement in the codebase. `ledsone` is a live database that
+the business's own order and listing systems write to continuously; the two new
+rows are bundle SKUs carrying `inventory_bool = false`, so neither enters this
+system's catalogue. The catalogue is unchanged at 6,510 and every figure above
+still holds. Full detail in the evidence record.
+
+### 9. Demonstration data is gone from production
+
+| Check | Result |
+| --- | --- |
+| Production modules importing `testdata/` (8 files) | **0** |
+| Loader / seeder / reset script | Deleted (`fixture/load.js`, `fixture/ensure-test-schema.js`) |
+| Schema creation SQL | Deleted (`sql/001-inventory-control-schema.sql`) |
+| `npm run seed:test`, `pretest` | Removed from `package.json` |
+| References to `varmen` in application code | **none** |
+| `DB_NAME` in `inventory/.env` | `ledsone` |
+
+`inventory/testdata/` remains as **test input only** and is not reachable from
+the running application.
+
+### 10. Test isolation
+
+| Check | Result |
+| --- | --- |
+| `npm test` | **155 passed, 0 failed**, 35 suites |
+| Same suite with credentials sabotaged (`DB_HOST=0.0.0.0 DB_PORT=1 DB_USER=nobody DB_NAME=nope`) | **155 passed, 0 failed** |
+
+The suite opens no database connection at all. Every test needing data points
+the store at in-memory arrays via `useSource(memorySource(…))`. There is no
+`--env-file` on the test path and no connection string. No test can read or
+write `ledsone`.
 
 ## Outcome
 
-**PASS.** No defect was found and no code change was required by this
-validation. Every MVP requirement is implemented and demonstrable from startup.
+**PASS.** Two defects were found during this round and both were fixed and
+covered by regression tests:
 
-## Second round - add, edit and delete (2026-09-10)
+1. Dashboard stock cards counted stock lines instead of catalogue SKUs, giving a
+   Healthy Stock figure larger than the catalogue itself.
+2. Record identifiers were trimmed, making seven real SKUs unreachable from
+   their own links.
 
-Carried out after the CRUD screens were added, against the same working tree.
-The results above were re-run unchanged and still hold. Captured output is in
-sections 12-21 of `evidence/inventory-mvp-evidence.md`.
-
-### Method
-
-1. **Automated tests** - `npm test`. The suite grew from 173 to 307 tests: 69
-   new tests over the write operations and their validation, 64 over the record
-   routes and the workflows they make up, and one existing test rewritten (see
-   below). All 307 pass.
-2. **Live HTTP walkthrough** - the server started and the whole workflow driven
-   over HTTP: add a product, view it, edit it, delete it; add a stock record,
-   edit its quantities, confirm available recalculated, check the dashboard and
-   the alerts screen; open an alert, view it, note it, change its status; add a
-   transfer, view it, edit its status, delete it; add an audit record, view it,
-   edit the counted quantity, confirm the difference recalculated, delete it.
-3. **Structural responsive check** - all 24 screens fetched and checked for
-   tables outside a scroll container, fixed widths wider than a phone, missing
-   breakpoints and forms or detail lists that do not collapse to one column.
-
-### Results
-
-| Check | Result | Basis |
-| --- | --- | --- |
-| Products add / view / edit / delete | PASS | Full cycle over HTTP; view showed every field and the generated thumbnail |
-| Duplicate SKU refused | PASS | `POST /products/add` with an existing SKU returned 400 with the form and the reason |
-| Stock add / view / edit / delete | PASS | Full cycle over HTTP |
-| Available recalculated | PASS | Edited 10/2 to 120/15; the view moved from 8 to 105 and the band from Low Stock to Healthy |
-| Available never accepted from a form | PASS | No `name="available"` on either form; an available field posted anyway is ignored |
-| Alerts view / action status / note | PASS | Status and note recorded and shown back on the view screen |
-| Resolving does not clear a real problem | PASS | Shortage marked Resolved stayed detected, stayed listed and stayed counted; it cleared only when the stock was corrected |
-| Transfers add / view / edit / delete | PASS | Full cycle over HTTP; same-warehouse, bad status and zero quantity all refused with 400 |
-| Transfers still move no stock | PASS | A 999-unit transfer left every stock figure unchanged |
-| Audit add / view / edit / delete | PASS | Full cycle over HTTP |
-| Difference recalculated | PASS | Counted 250 against 260 showed `-10` and Discrepancy; edited to 260 it showed `0` and Matches |
-| Dashboard follows the data | PASS | Total SKUs, Low Stock, Discrepancies and Pending Transfers each moved with the change that should move them |
-| The six rules still work | PASS | Every issue raised after CRUD is one of the six; mismatch, inactive-listing and slow-moving all still fire on edited data; Low Stock and Out of Stock still never both fire on one line |
-| No destructive GET | PASS | All four delete confirmation pages fetched; every record still present afterwards |
-| Existing routes and filters | PASS | All six screens and every existing filter returned 200 |
-| Responsive shell intact | PASS | All 24 screens carry the viewport meta and all three breakpoints; every table is inside a scroll container; no fixed width above 320px |
-| No client-side JavaScript | PASS at the time | True when this round ran. The filter bars were later changed to dropdowns that apply on change, which added `/filters.js` - one same-origin file, CSP `script-src 'self'`, no inline handler and no dependency |
-
-### One existing test was rewritten, not weakened
-
-`data.test.js` asserted that `STOCK_LINES.push(...)` throws - that the
-collections were frozen. That is exactly the guarantee this change removes: the
-collections are now the session. It was replaced with the stronger guarantee the
-store actually provides, and that one is asserted directly: every **record**
-stays frozen, and an edit swaps in a new record rather than writing into the old
-one, so a screen already holding a record never sees it change underneath. No
-other existing test was changed, skipped or removed.
-
-### Outcome
-
-**PASS.** No defect was found. Every screen listed in the task has view, add,
-edit and delete where those make sense, the derived figures stay derived, and
-the detection rules are unchanged.
-
-## Third round - PostgreSQL persistence (2026-09-10)
-
-The in-memory session store was replaced with PostgreSQL. Data now lives in
-`varmen_db`, in a schema of its own called `inventory_control`.
-
-### What was created, and what was not touched
-
-Seven tables in one new schema: `products`, `warehouses`, `product_warehouses`,
-`stock_lines`, `transfers`, `audit_counts`, `alert_actions`. Created by
-`sql/001-inventory-control-schema.sql`, which contains only `CREATE` statements.
-
-The schema was confirmed absent before creation, and no proposed table name
-collided with an existing one. The six schemas already in `varmen_db` -
-`competitor_analysis` (3 tables), `cst_app` (22), `issue_tracking` (17 + 1 view),
-`poc_listing` (13 + 2 views), `review` (2), `welfare` (1) - were counted before
-and after and are unchanged. Nothing in the application names any schema but
-`inventory_control`: every statement in `store.js` and `fixture/load.js` is qualified
-with it, and a repository-wide search finds no other schema referenced outside a
-comment.
-
-### Two deliberate schema decisions
-
-1. **No column exists for `available` or `difference`.** Both stay derived, so a
-   stored figure cannot disagree with the figures it comes from.
-2. **`stock_lines` carries no foreign keys.** Three of the conditions the
-   Warehouse/SKU Mismatch rule detects *are* broken references. A foreign key
-   would make them impossible to record - removing the system's ability to
-   report the problem rather than fixing it. Every other table where a broken
-   reference is not a detectable condition does use real foreign keys.
-
-### Known limitations of this round
-
-- The whole test suite runs against the live database, so a run both depends on
-  and rewrites `inventory_control`. It reseeds before each case and leaves the
-  schema at the seeded dataset, but it is not safe to run two suites at once.
-- **The suite must run one file at a time.** `node --test` runs test *files* in
-  parallel by default, and every file that touches data reseeds before each
-  case - so in parallel they pull the data out from under each other. Found the
-  hard way: each file passed alone and twenty cases failed together. The npm
-  script now passes `--test-concurrency=1`. Running `node --test` directly,
-  without that flag, will produce spurious failures.
-- Round-trip latency to the database is roughly 200ms, and the suite is now
-  serial, so a full run takes minutes rather than seconds.
-- **Transfer and audit identifiers are allocated by reading the highest in use**
-  (`TR-1009`, `AC-1011`) rather than from a sequence. Two people adding a
-  transfer at the same instant could be handed the same id, and the second
-  insert would fail on the primary key rather than corrupt anything. A sequence
-  or an identity column would remove the race; it has not been done because the
-  ids are part of what the screens show and the MVP has one user at a time.
-- The application connects as `varmen_user`, which **owns** the database and can
-  therefore drop it. A role scoped to `inventory_control` - or a read-only role
-  for the reporting screens and a separate writer - would be the right shape
-  before this is used by more than one person.
+One agreed definition was corrected: Low Stock is now inclusive of 10.
 
 ## Known limitations at the point of validation
 
 These are recorded boundaries, not defects. They are listed in full in
-`capability/inventory-mvp-capabilities.md`:
+`capability/inventory-mvp-capabilities.md`.
 
-- Negative Inventory has no dashboard tile. The MVP source names six tiles and
-  Negative Inventory is not among them; it is shown on Warehouse Stock as its
-  own band and in the dashboard issue breakdown.
-- The stock tiles count stock lines, not SKUs, because one SKU can be healthy at
-  one site and out of stock at another. Each tile is labelled with its unit.
-- Transfers do not move stock.
-- Changes made through the new screens live in memory only and are lost on
-  restart. There is no audit trail of who changed what, and no concurrency
-  control if two people edit the same record.
+- **Three things the source does not hold**, and none is invented: no
+  minimum/reorder level (an application threshold of 10 is used and labelled as
+  such), no inter-warehouse transfers (screen empty), no physical stock counts
+  (screen empty).
+- **Negative Inventory has no dashboard card.** Six cards are agreed and it is
+  not among them; it appears on Warehouse Stock as its own band, in the
+  dashboard issue breakdown, and in the Products stock filter.
+- **Warehouse/SKU Mismatch checks two conditions, not three.** The source keeps
+  no approved-sites list, so that check is skipped rather than failed.
+- **Partial field coverage.** Category resolves for 3,812 of 6,510 SKUs and
+  supplier for 1,628; the rest show "Not recorded". Category is a marketplace
+  field with 323 distinct values including near-duplicates and several
+  languages.
+- **Figures can be up to 60 seconds old**, because reads are cached in-process.
+  Nothing is written back, so a cached figure can only be behind.
+- **List screens render at most 200 rows.** Counts and dashboard figures are
+  computed over the whole set first, so nothing is under-reported.
+- **No authentication, permissions, audit trail or API.** Anyone who can reach
+  the port sees everything.

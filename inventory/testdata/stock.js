@@ -1,5 +1,5 @@
 /**
- * Warehouse stock lines for the dummy dataset.
+ * Warehouse stock lines for the test dataset.
  *
  * One line per SKU per warehouse. All quantities are invented.
  *

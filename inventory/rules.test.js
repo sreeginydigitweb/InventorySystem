@@ -4,7 +4,7 @@
  * Two kinds of test appear here on purpose:
  *
  *   - rules tested against small hand-built lines, so the rule itself is pinned
- *     down independently of the dummy dataset;
+ *     down independently of the test dataset;
  *   - rules tested against the real dummy dataset, so the shipped data is
  *     proven to demonstrate every condition the MVP has to show.
  *
@@ -32,9 +32,9 @@ import {
   stockStatus,
   warehouseMismatchReason,
 } from './rules.js';
-import { STOCK_LINES } from './fixture/stock.js';
-import { PRODUCTS } from './fixture/products.js';
-import { WAREHOUSES } from './fixture/warehouses.js';
+import { STOCK_LINES } from './testdata/stock.js';
+import { PRODUCTS } from './testdata/products.js';
+import { WAREHOUSES } from './testdata/warehouses.js';
 
 /*
  * The three rules that ask what a SKU or a warehouse IS are given a catalogue
@@ -128,7 +128,7 @@ describe('stockStatus', () => {
     assert.equal(stockStatus(line({ onHand: 84, reserved: 12, minimum: 25 })), STOCK_STATUS.HEALTHY);
   });
 
-  test('gives every line in the dummy data exactly one band', () => {
+  test('gives every line in the test data exactly one band', () => {
     const bands = Object.values(STOCK_STATUS);
     for (const stored of STOCK_LINES) {
       assert.ok(bands.includes(stockStatus(stored)), `${stored.sku} has no band`);
@@ -246,10 +246,10 @@ describe('detectIssues', () => {
     }
   });
 
-  test('the dummy data demonstrates all six issue types', () => {
+  test('the test data demonstrates all six issue types', () => {
     const found = new Set(detectIssues(STOCK_LINES, catalogue).map((issue) => issue.type));
     for (const type of ISSUE_TYPES) {
-      assert.ok(found.has(type), `the dummy data raises no ${type}`);
+      assert.ok(found.has(type), `the test data raises no ${type}`);
     }
   });
 

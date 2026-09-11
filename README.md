@@ -8,65 +8,94 @@ problems are seen and acted on rather than discovered late.
 
 ## What this repository contains
 
-This repository will hold the **Smart Inventory Control MVP**.
+The **Smart Inventory Control MVP**, reporting on **real inventory data**.
 
-The MVP runs on **realistic dummy inventory data**. There is no live inventory
-database and no real inventory data at this stage: the dummy data is invented,
-and is shaped as the real thing would be so the system can be built and reviewed
-before any live source is connected.
+The system reads `ledsone`, the existing business inventory database. There is no
+dummy data, no demonstration dataset and no schema of its own: every figure on
+every screen is read from `ledsone` at the moment the page is built.
 
-The system will eventually cover:
+| Area | Purpose | Source |
+| --- | --- | --- |
+| Dashboard | The overall stock position at a glance | Calculated from the four below |
+| Products | The product and SKU records the system works from | `inventory.products` (SKUs flagged `inventory_bool`) |
+| Warehouse Stock | Stock held, by product and by location | `inventory.physical_product_stock`, `inventory.warehouse` |
+| Alerts / Issues | Stock conditions that need attention | Calculated from products, warehouses and stock |
+| Transfers | Stock moving between locations | Not held in `ledsone` — see "What the source does not hold" |
+| Inventory Audit | Counting stock and reconciling what is found against what is expected | Not held in `ledsone` — see below |
 
-| Area | Purpose |
-| --- | --- |
-| Dashboard | The overall stock position at a glance |
-| Products | The product and SKU records the system works from |
-| Warehouse Stock | Stock held, by product and by location |
-| Alerts / Issues | Stock conditions that need attention |
-| Transfers | Stock moving between locations |
-| Inventory Audit | Counting stock and reconciling what is found against what is expected |
+## THE SOURCE DATABASE IS READ-ONLY
 
-All six areas read and write PostgreSQL. The application serves the
-`inventory_control` schema in `varmen_db` and never seeds it: what is on
-screen is whatever is in that schema.
+`ledsone` belongs to the business, not to this application. This system reports
+on it and **never writes to it**. There is no add, edit or delete anywhere in it.
+
+Four independent things keep that true:
+
+1. **No write statement exists.** Every statement in the codebase is a `SELECT`.
+   There is no `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `DROP` or
+   `TRUNCATE` in it, and no migration, seed or reset script.
+2. **No write screen exists.** There is no add, edit or delete route, no form
+   that posts, and no button that submits. `routeForm()` answers every POST with
+   a page explaining that the source is read-only.
+3. **The connection refuses writes.** The pool opens every connection with
+   `default_transaction_read_only = on` as a startup option, so the *server*
+   rejects a write on it whatever the application asks for.
+4. **The role holds no write privilege.** `checkConnection()` asks PostgreSQL at
+   startup whether the role could write to `inventory.products`. If the answer
+   is ever yes, the application **refuses to start**.
+
+Any one of the four would be enough.
+
+## What the source does not hold
+
+Three things the screens can show have no source column. None of them is filled
+in with an invented value; each screen says what is missing and why.
+
+| Missing | Affects | What the system does instead |
+| --- | --- | --- |
+| Minimum / reorder level per SKU per site | Low Stock rule, Dashboard "Low Stock" card | Judged against one application-wide threshold, `LOW_STOCK_THRESHOLD` in `rules.js`, printed above the Warehouse Stock table. Not presented as the business's figure. |
+| Inter-warehouse transfers | Transfers screen, Dashboard "Pending Transfers" card | The screen is empty and says so. The card reads 0. Nothing is invented, and nothing can be created. |
+| Physical stock counts | Inventory Audit screen, Dashboard "Discrepancies" card | The screen is empty and says so. The card reads 0. `Difference = Counted − System` is still the only definition; there is simply nothing to apply it to. |
+
+A SKU with no Shopify listing, no purchase order or no sales in the window shows
+**Not recorded** for Category, Supplier or units sold, rather than a blank or a
+zero that could be read as a figure.
 
 ## Running it
 
-Node 20 or newer, and a PostgreSQL database.
+Node 20 or newer.
 
 ```
 npm install                                  # one dependency: pg
 cp inventory/.env.example inventory/.env     # then fill it in
-psql "<connection>" -f sql/001-inventory-control-schema.sql
 npm start                                    # http://localhost:3000/
 npm test                                     # the test suite
 ```
 
-There is no seed step for the application. `inventory_control` holds the real
-stock data, and nothing in the running application writes demonstration data
-into it.
+There is no schema to create, no migration to run and no seed step. The source
+database already holds the data.
 
 `inventory/.env` holds the connection and is git-ignored. `.env.example` is the
-template and holds no real values.
+template and holds no real values. `DB_USER` should name a role with `SELECT`
+and nothing else; the application refuses to start against a role that can
+write.
 
-## Tests and the production schema
+## Tests never reach the source database
 
-The suite empties and reseeds every table it touches on each test case, so it is
-kept away from the production schema by two independent measures:
+The suite opens no database connection at all. Every test that needs data points
+the store at the sample arrays in `inventory/testdata/`, held in memory:
 
-1. `npm test` loads `inventory/test.env`, which sets `DB_SCHEMA=inventory_control_test`.
-   The schema is created and seeded automatically by the pretest step. Connection
-   details still come from `inventory/.env`, so the password lives in one file only.
-2. `inventory/fixture/load.js` refuses outright to delete or seed when `DB_SCHEMA`
-   is `inventory_control`, whatever the configuration says. A shell variable that
-   overrides `test.env` does not get past it - the run fails with a clear message
-   and writes nothing.
+```js
+useSource(memorySource({ products: PRODUCTS, warehouses: WAREHOUSES, stockLines: STOCK_LINES }));
+```
 
-So the fixture can only ever reach the test schema, and `npm run seed:test` is
-the only way to load it.
+So the suite runs anywhere, is unaffected by what is in the real data today, and
+cannot touch it — there is no connection string in the test path, no `--env-file`
+and no loader. `inventory/testdata/` is invented sample data used as test input
+only; it is never written to any database and nothing in the running application
+imports it. See `inventory/testdata/README.md`.
 
-`documentation/smart-inventory-control-mvp.md` covers the dummy data structure,
-the detection rules and each of the six areas in detail.
+`documentation/smart-inventory-control-mvp.md` covers the detection rules and
+each of the six areas in detail.
 
 ## How the application is laid out
 
@@ -77,22 +106,25 @@ changes, so the filters need no Apply button.
 
 | Path | Responsibility |
 | --- | --- |
-| `inventory/db.js` | The PostgreSQL pool, and the only place a connection is made. |
-| `inventory/fixture/` | Test fixture only. Never loaded by the application, and never written to `inventory_control`. |
-| `inventory/fixture/load.js` | Loads the fixture into the **test** schema. Refuses to run against `inventory_control`. |
-| `inventory/fixture/ensure-test-schema.js` | Creates and seeds `inventory_control_test` before the suite runs. |
-| `inventory/store.js` | The only place data is read or written: validation and the SQL. |
+| `inventory/db.js` | The PostgreSQL pool, and the only place a connection is made. Read-only. |
+| `inventory/source.js` | The only place that knows `ledsone`'s tables. All the SQL, and the mapping to the shapes the screens use. |
+| `inventory/store.js` | What the rest of the system asks for data. Read-only, and swappable for tests. |
 | `inventory/rules.js` | The six detection rules and the stock health bands. |
 | `inventory/reports.js` | Derived views: dashboard figures, audit differences, per-screen rows. |
 | `inventory/render.js` | HTML only. |
-| `inventory/router.js` | Path and query to a response, and form posts to a write. Pure, so both are testable without a server. |
+| `inventory/router.js` | Path and query to a response. Pure, so it is testable without a server. |
 | `inventory/server.js` | The HTTP shell. |
+| `inventory/testdata/` | Invented sample rows. **Test input only** — never loaded into any database, never imported by the application. |
 
-Records are added, edited and deleted through the screens and persist in
-PostgreSQL - restarting the server changes nothing. The application reads and
-writes one schema, `inventory_control`, and never touches any other schema in
-the database. Available stock and the audit difference have no columns at all:
-both are always calculated, never stored and never entered.
+Available stock and the audit difference are never stored. Available is always
+`Current − Reserved`, the difference is always `Counted − System`, and every
+detected issue is recomputed on each page load — so none of them can drift from
+the figures they come from, and an issue cannot be dismissed while its cause is
+still there.
+
+Each list screen renders at most 200 rows and says so above the table
+("showing 200 of 68,237 stock lines"). The filters narrow the whole set, not the
+first page, so a search finds a SKU wherever it sits.
 
 ## Standard folders
 

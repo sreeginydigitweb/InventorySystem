@@ -1,415 +1,484 @@
-# Smart Inventory Control MVP - evidence
+# Smart Inventory Control - evidence
 
 Captured output supporting `validation/inventory-mvp-validation.md`.
-Captured 2026-09-10 on Node v24.20.0, Windows 11.
+Captured **2026-09-11** on Node v24.20.0, Windows 11, against the live `ledsone`
+database.
 
-All output below is copied from actual command runs. Nothing here is
-illustrative or reconstructed, and no screenshots are claimed.
-
-## 1. Test run - `npm test`
-
-```
-ℹ tests 173
-ℹ suites 41
-ℹ pass 173
-ℹ fail 0
-ℹ cancelled 0
-ℹ skipped 0
-ℹ todo 0
-ℹ duration_ms 309.4212
-```
-
-## 2. Independent recomputation from the raw data files
-
-Recalculated directly from `inventory/fixture/*.js` without importing `rules.js` or
-`reports.js`:
-
-```
-Total SKUs        : 14
-Healthy Stock     : 22
-Low Stock         : 5
-Out-of-Stock      : 4
-Negative Inventory: 1
-Discrepancies     : 5 | Audit matches: 5
-Pending Transfers : 3
-Bands sum         : 32 of 32 lines
-
-mismatch: unknown warehouse 1 | unknown SKU 1 | unapproved site 1
-inactive listing holding stock: 4
-slow-moving (active, held, <=5): 3
-over-reserved lines: 1
-transfer statuses: { Pending: 3, 'In Transit': 3, Received: 2 }
-```
-
-## 3. Rendered HTML parsed back and re-checked
-
-```
-PASS  parsed 32 stock rows from HTML (expected 32)
-PASS  every rendered Available = Current - Reserved
-PASS  parsed 10 audit rows (expected 10)
-PASS  every rendered Difference = Counted - System
-PASS  all 14 products render sku+name+category+supplier+image
-PASS  all 8 transfers render
-PASS  issue type shown: Low Stock / Out of Stock / Negative Inventory /
-      Warehouse/SKU Mismatch / Inactive Listing / Slow-Moving Stock
-ALL HTML CONTENT CHECKS PASSED
-```
-
-## 4. Server startup - `npm start`
-
-```
-> smart-inventory-control@0.1.0 start
-> node inventory/server.js
-
-[inventory] Smart Inventory Control running on http://localhost:3000/
-[inventory] dummy data only - no database, no live inventory source.
-```
-
-This was the complete server log after every route, filter and image below had
-been requested: no errors, no warnings.
-
-## 5. Live routes
-
-```
-/              HTTP 200    11050 bytes  0.019245s
-/products      HTTP 200    14992 bytes  0.002092s
-/stock         HTTP 200    21258 bytes  0.001845s
-/alerts        HTTP 200    16618 bytes  0.001699s
-/transfers     HTTP 200    11731 bytes  0.001763s
-/audit         HTTP 200    12809 bytes  0.001384s
-```
-
-## 6. Live images
-
-```
-SIC-1001   HTTP 200  image/svg+xml; charset=utf-8  383 bytes
-SIC-3001   HTTP 200  image/svg+xml; charset=utf-8  386 bytes
-SIC-5003   HTTP 200  image/svg+xml; charset=utf-8  374 bytes
-SIC-9999   HTTP 200  image/svg+xml; charset=utf-8  367 bytes
-```
-
-`SIC-9999` is the SKU deliberately absent from the catalogue; it returns a
-neutral placeholder rather than a broken image.
-
-## 7. Live filters
-
-```
-/products?category=Bulbs                   -> 3 of 14 products
-/products?supplier=Verity+Home+Fittings    -> 4 of 14 products
-/products?q=aurora                         -> 1 of 14 products
-/stock?warehouse=WH-BIR                    -> 10 of 32 stock lines
-/stock?status=Low+Stock                    -> 5 of 32 stock lines
-/stock?status=Negative+Inventory            -> 1 of 32 stock lines
-/alerts?type=Warehouse%2FSKU+Mismatch      -> 3 of 20 issues
-/alerts?type=Inactive+Listing              -> 4 of 20 issues
-/alerts?warehouse=WH-MAN                   -> 5 of 20 issues
-/transfers?status=Pending                  -> 3 of 8 transfers
-/transfers?status=In+Transit               -> 3 of 8 transfers
-/transfers?status=Received                 -> 2 of 8 transfers
-/audit?difference=only                     -> 5 of 10 audit lines
-/audit?warehouse=WH-BIR                    -> 4 of 10 audit lines
-```
-
-## 8. Navigation - every link on every screen followed
-
-```
-/            19 links checked, 0 broken
-/products     6 links checked, 0 broken
-/stock        6 links checked, 0 broken
-/alerts       6 links checked, 0 broken
-/transfers    6 links checked, 0 broken
-/audit        6 links checked, 0 broken
-```
-
-## 9. Dashboard tiles as rendered live
-
-```
-14   Total SKUs
-22   Healthy Stock
-5    Low Stock
-4    Out-of-Stock Items
-5    Discrepancies
-3    Pending Transfers
-```
-
-## 10. Repository standard intact
-
-```
-all 12 folder READMEs still byte-identical to canonical (untouched)
-Initial-Mini-AIOS HEAD 5c1233a | changes: 0
-Task 1 HEAD 05987d0 | changes: 0
-```
-
-## 11. Server stopped
-
-```
-SUCCESS: The process with PID 13356 has been terminated.
-probe after stop: 000
-server stopped cleanly (connection refused)
-```
+All output below is copied from actual command runs and actual HTTP responses.
+Nothing here is illustrative or reconstructed, and no screenshots are claimed.
 
 ---
 
-# Round two - add, edit and delete
-
-Captured 2026-09-10 on Node v24.20.0, Windows 11, supporting the second round in
-`validation/inventory-mvp-validation.md`. Same rule as above: every block is
-copied from an actual run. Sections 1-11 were re-run unchanged and still hold.
-
-## 12. Test run - `npm test`
+## 1. Test run — `npm test`
 
 ```
-ℹ tests 307
-ℹ suites 60
-ℹ pass 307
+ℹ tests 155
+ℹ suites 35
+ℹ pass 155
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 408.6108
 ```
 
-By file:
+## 2. The tests open no database connection
+
+The same suite, run with the connection details deliberately sabotaged. If any
+test opened a connection it would fail.
 
 ```
-crud.test.js      64      (new - the record routes and the workflows)
-data.test.js      35
-render.test.js    24
-reports.test.js   33
-router.test.js    42
-rules.test.js     40
-store.test.js     69      (new - the write operations and their validation)
+$ DB_HOST=0.0.0.0 DB_PORT=1 DB_USER=nobody DB_PASSWORD=x DB_NAME=nope npm test
+
+ℹ tests 155
+ℹ pass 155
+ℹ fail 0
 ```
 
-## 13. Products - add, view, edit, delete over HTTP
+## 3. Server startup — `npm start`
 
 ```
-GET  /products/add                 200
-POST /products/add   SIC-9100      303  /products?done=product-added&subject=SIC-9100
-GET  /products/view?sku=SIC-9100   200
-     view shows: /images/SIC-9100.svg
-     view shows: Evidence Test Lamp
-     view shows: pill ok">Active
-     view shows: Verity Home Fittings
-POST /products/edit  -> Inactive   303  /products?done=product-updated&subject=SIC-9100
-     view shows: (edited)
-     view shows: pill neutral">Inactive
-POST /products/add   duplicate SKU 400   (refused)
-POST /products/add   bad listing   400   (refused)
-GET  /products/delete (asks)       200   record still present: 200
-POST /products/delete              303  /products?done=product-deleted&subject=SIC-9100
-GET  view after delete             404
-```
-
-## 14. Warehouse stock - Available is recalculated, never accepted
-
-```
-dashboard Low Stock, before        5
-POST /stock/add  10 on hand, min 50 303  /stock?done=stock-added&subject=SIC-1003
-dashboard Low Stock, after add     6   (the new line is short)
-     view shows: <strong>8</strong>
-     view shows: 10 on hand minus 2 reserved
-     view shows: pill warn">Low Stock
-POST /stock/edit 120 on hand, res 15 303  /stock?done=stock-updated&subject=SIC-1003
-     view shows: <strong>105</strong>
-     view shows: 120 on hand minus 15 reserved
-     view shows: pill ok">Healthy
-dashboard Low Stock, after fix     5   (back where it started)
-
-name="available" on /stock/add     0 occurrences
-name="available" on /stock/edit    0 occurrences
-POST /stock/add  available=999     303   (accepted, field ignored)
-     view shows: <strong>30</strong>
-     view shows: 40 on hand minus 10 reserved
-```
-
-An `available=999` posted alongside 40 on hand and 10 reserved is discarded: the
-record stores the three figures and the screen shows 30.
-
-Validation refusals:
-
-```
-POST /stock/add  unknown SKU       400
-POST /stock/add  unknown warehouse 400
-POST /stock/add  duplicate pair    400
-POST /stock/add  reserved=-1       400
-```
-
-## 15. Alerts - a resolved issue is still a detected issue
-
-Measured on the running server over HTTP, by counting the SIC-1002 row on
-`/alerts?type=Low+Stock&warehouse=WH-BIR`:
-
-```
-Low Stock rows for SIC-1002@WH-BIR, before   1   labelled: pill neutral">Open
-POST /alerts/resolve                        303  /alerts?done=issue-resolved&subject=Low Stock on SIC-1002
-Low Stock rows for SIC-1002@WH-BIR, after    1   labelled: pill ok">Resolved
-                                            ^ still raised, now carrying the label
-
--- correct the stock, which is the only thing that clears it --
-POST /stock/edit  onHand 18 -> 200           303  /stock?done=stock-updated&subject=SIC-1002
-Low Stock rows for SIC-1002@WH-BIR, now      0   <- gone, because the stock is no longer short
-```
-
-Recording an action:
-
-```
-GET  /alerts/view                  200
-     view shows: 12 available against a minimum of 20
-     view shows: Birmingham Central
-     view shows: Low Stock
-     view shows: pill neutral">Open
-     view shows: SIC-1002
-POST /alerts/edit  In Progress+note 303  /alerts?done=issue-actioned&subject=Low Stock on SIC-1002
-     view shows: Chased Halden; 60 units due Friday.
-     view shows: pill info">In Progress
-POST /alerts/edit  bad status      400   (refused)
-```
-
-> A first attempt at this section measured the issue count by spawning
-> `node -e "import('./inventory/reports.js')..."`. That runs in a **separate
-> process** with its own copy of the seed data and cannot see the running
-> server's session, so it reported the seeded figure both before and after and
-> proved nothing. The measurement above goes over HTTP to the server itself.
-> The discarded attempt is recorded here rather than quietly dropped.
-
-## 16. Transfers - still a record only
-
-```
-dashboard Pending Transfers, before 3
-POST /transfers/add                303  /transfers?done=transfer-added&subject=TR-1009
-dashboard Pending Transfers, after  4
-GET  /transfers/view?id=TR-1009     200
-     view shows: Birmingham Central
-     view shows: Bristol South West
-     view shows: pill warn">Pending
-     view shows: TR-1009
-POST /transfers/edit -> In Transit  303  /transfers?done=transfer-updated&subject=TR-1009
-     view shows: pill info">In Transit
-SIC-1001 @ WH-BIR available         72 before, 72 after   (transfers move no stock)
-POST same warehouse both ends       400   (refused)
-POST status=Cancelled               400   (refused)
-POST quantity=0                     400   (refused)
-POST unknown warehouse              400   (refused)
-GET  /transfers/delete (asks)       200   record still present: 200
-POST /transfers/delete              303  /transfers?done=transfer-deleted&subject=TR-1009
-GET  view after delete              404
-```
-
-## 17. Inventory audit - Difference is recalculated, never accepted
-
-```
-GET  /audit/add?sku=SIC-3001&warehouse=WH-BIR   200
-     system figure prefilled from the stock data: name="systemQuantity" value="260"
-dashboard Discrepancies, before                5
-POST /audit/add  counted 250 of 260            303  /audit?done=audit-added&subject=AC-1011
-dashboard Discrepancies, after                 6
-     view shows: 250 counted minus 260 system
-     view shows: class="neg">-10<
-     view shows: pill bad">Discrepancy
-POST /audit/edit counted 250 -> 260            303  /audit?done=audit-updated&subject=AC-1011
-     view shows: 260 counted minus 260 system
-     view shows: muted">0<
-     view shows: pill ok">Matches
-POST /audit/edit counted 260 -> 275            303  /audit?done=audit-updated&subject=AC-1011
-     view shows: 275 counted minus 260 system
-     view shows: class="pos">+15<
-
-name="difference" on /audit/add                0 occurrences
-POST /audit/add  difference=999                303   (accepted, field ignored)
-     audit list shows the calculated value: class="neg">-4<
-POST /audit/add  counted=-1                    400   (refused)
-POST /audit/add  no counter                    400   (refused)
-GET  /audit/delete (asks)                      200   record still present: 200
-POST /audit/delete                             303  /audit?done=audit-deleted&subject=AC-1011
-GET  view after delete                         404
-```
-
-The difference was driven negative, to zero and positive by editing only the
-counted figure. A `difference=999` posted against 48 system and 44 counted is
-discarded: the list shows the calculated `-4`.
-
-## 18. Deleting a product that other records point at
-
-```
-     confirmation page says: is still referenced by 2 stock line(s), 0 transfer(s) and 1 audit record(s)
-POST /products/delete  no consent   400   (refused)
-product still present               200
-stock line still present            200
-POST /products/delete  cascade=yes  303  /products?done=product-deleted-cascade&subject=SIC-2002
-product gone                        404
-its stock line gone with it         404   (no dangling reference)
-```
-
-## 19. Nothing destructive is reachable by a GET
-
-All four delete confirmation pages fetched, then every record re-checked:
-
-```
-GET /products/delete?sku=SIC-1001                200
-GET /stock/delete?sku=SIC-1001&warehouse=WH-BIR  200
-GET /transfers/delete?id=TR-1001                 200
-GET /audit/delete?id=AC-1001                     200
-
-records afterwards: product 200, stock 200, transfer 200, audit 200
-```
-
-Method handling:
-
-```
-DELETE /products          405
-PUT    /stock             405
-POST   application/json   400   (only form-encoded bodies are accepted)
-```
-
-## 20. Links and responsive structure across all 24 screens
-
-Every link on the six list screens followed:
-
-```
-/            19 links checked, 0 broken
-/products    46 links checked, 0 broken
-/stock       97 links checked, 0 broken
-/alerts      40 links checked, 0 broken
-/transfers   31 links checked, 0 broken
-/audit       37 links checked, 0 broken
-           270 links total, 0 broken
-```
-
-Structural check over the six list screens plus all eighteen record screens:
-
-```
-screens checked        : 24
-tables found           : 8, all inside a scroll container
-viewport meta          : present on all 24
-three breakpoints      : present on all 24
-client-side JavaScript : none on any screen
-fixed widths > 320px   : none
-forms/detail collapse  : one column below 768px on every screen that has them
-
-0 problems.
-```
-
-This is a structural check of the served HTML and CSS, not a rendered-pixel
-check. No browser automation was available in the session that produced it, so
-no screenshot or measured layout is claimed.
-
-## 21. Server log and shutdown
-
-The complete log after every request in sections 13-20, including the 400s and
-404s, had been made:
-
-```
-> smart-inventory-control@0.1.0 start
-> node inventory/server.js
-
 [inventory] Smart Inventory Control running on http://localhost:3000/
-[inventory] dummy data only - no database, no live inventory source.
+[inventory] reading ledsone as varmen_user - read-only connection: yes, no write privileges.
 ```
 
-No errors, no warnings, no stack traces.
+The second line is printed by `checkConnection()`, which asks PostgreSQL three
+questions before the server will listen: is the `inventory` schema there, is
+`transaction_read_only` on, and does this role hold INSERT/UPDATE/DELETE. A
+"no" to the second or a "yes" to the third stops startup.
+
+## 4. Live routes
 
 ```
-terminated PID 8280
-probe after stop: 000   (connection refused)
+/            200
+/products    200
+/stock       200
+/alerts      200
+/transfers   200
+/audit       200
+/filters.js  200
+/nope        404
 ```
+
+## 5. Nothing accepts a write
+
+```
+POST /products/add      405
+POST /stock/edit        405
+POST /audit/delete      405
+POST /alerts/resolve    405
+```
+
+No redirect, no 303, no partial write — each returns the page explaining that
+the source database is read-only.
+
+Every screen is **view only**. Counted in the served HTML of all six:
+
+```
+screen        <form> total   method="post"   links to /add /edit /delete /resolve
+/                   0              0                 0
+/products           1              0                 0
+/stock              1              0                 0
+/alerts             1              0                 0
+/transfers          1              0                 0
+/audit              1              0                 0
+```
+
+The one form on each list screen is the filter bar, which is a `GET` and can
+only ask for a different view of the same data.
+
+## 6. Dashboard as rendered live
+
+```
+6,510   Total SKUs
+4,010   Healthy Stock
+561     Low Stock
+1,379   Out-of-Stock Items
+0       Discrepancies
+0       Pending Transfers
+```
+
+## 7. The same figures recomputed independently in SQL
+
+Run against `ledsone` directly. Shares no code with the application.
+
+```sql
+WITH sku_position AS (
+  SELECT p.sku,
+         sum(s.quantity)::int          AS on_hand,
+         sum(s.reserved_quantity)::int AS reserved,
+         (sum(s.quantity) - sum(s.reserved_quantity))::int AS available
+    FROM inventory.products p
+    LEFT JOIN inventory.physical_product_stock s ON s.inventory = p.id
+   WHERE p.inventory_bool
+   GROUP BY p.sku
+)
+SELECT count(*)                                                  AS total_skus,
+       count(*) FILTER (WHERE on_hand < 0)                       AS negative_skus,
+       count(*) FILTER (WHERE on_hand >= 0 AND available <= 0)   AS out_of_stock_skus,
+       count(*) FILTER (WHERE on_hand >= 0 AND available BETWEEN 1 AND 10) AS low_stock_skus,
+       count(*) FILTER (WHERE on_hand >= 0 AND available > 10)   AS healthy_skus
+  FROM sku_position;
+```
+
+```
+total_skus | negative_skus | out_of_stock_skus | low_stock_skus | healthy_skus
+-----------+---------------+-------------------+----------------+--------------
+      6510 |           560 |              1379 |            561 |         4010
+```
+
+| Card | Application | SQL | Result |
+| --- | --- | --- | --- |
+| Total SKUs | 6,510 | 6,510 | MATCH |
+| Healthy Stock | 4,010 | 4,010 | MATCH |
+| Low Stock | 561 | 561 | MATCH |
+| Out-of-Stock Items | 1,379 | 1,379 | MATCH |
+
+`4,010 + 561 + 1,379 + 560 = 6,510` — every SKU in exactly one band.
+
+## 8. Proof that the cards are not counting stock lines
+
+A defect found and fixed during this round: the stock cards were banding stock
+lines rather than catalogue SKUs, which produced a Healthy Stock figure of 6,791
+against a 6,510-SKU catalogue — larger than the set it is a subset of. Traced to
+`dashboardMetrics()` and confirmed against the source:
+
+```sql
+SELECT count(*) AS total_lines,
+       count(*) FILTER (WHERE s.quantity >= 0 AND s.quantity - s.reserved_quantity > 9) AS healthy_lines
+  FROM inventory.physical_product_stock s
+  JOIN inventory.products p ON p.id = s.inventory AND p.inventory_bool;
+```
+
+```
+ total_lines | healthy_lines
+-------------+---------------
+       68237 |          6791
+```
+
+6,791 was exactly the count of healthy **stock lines** — one SKU at one
+warehouse — not SKUs. Fixed; see §7 for the figures now.
+
+## 9. Each card and the screen it opens show the same number
+
+```
+/products                            showing 200 of 6,510 products
+/products?stock=Healthy              showing 200 of 4,010 products matching, out of 6,510
+/products?stock=Low+Stock            showing 200 of 561 products matching, out of 6,510
+/products?stock=Out+of+Stock         showing 200 of 1,379 products matching, out of 6,510
+/products?stock=Negative+Inventory   showing 200 of 560 products matching, out of 6,510
+/transfers?status=Pending            0 transfers
+/audit?show=discrepancy              0 audit lines
+```
+
+## 10. Dashboard issue breakdown against the Alerts screen
+
+Dashboard summary, and the same filter applied on `/alerts`:
+
+| Issue type | Dashboard | `/alerts?type=…` | Result |
+| --- | --- | --- | --- |
+| Negative Inventory | 2,076 | 2,076 | MATCH |
+| Out of Stock | 58,211 | 58,211 | MATCH |
+| Low Stock | 1,289 | 1,289 | MATCH |
+| Warehouse/SKU Mismatch | 3,160 | 3,160 | MATCH |
+| Inactive Listing | 364 | 364 | MATCH |
+| Slow-Moving Stock | 2,647 | 2,647 | MATCH |
+
+`2,076 + 58,211 + 1,289 + 3,160 + 364 + 2,647 = 67,747`, which is the unfiltered
+total the screen reports:
+
+```
+/alerts    showing 200 of 67,747 issues
+```
+
+These count **issues** (one SKU at one warehouse), not SKUs, which is correct:
+an issue is about a specific line. The six dashboard cards count SKUs.
+
+## 11. Derived figures parsed back out of the rendered HTML
+
+The served HTML was re-parsed and every row recomputed, rather than trusting the
+code that produced it:
+
+```
+/stock                                 200 rows, 0 mismatches
+/stock?status=Negative+Inventory       200 rows, 0 mismatches
+/stock?status=Low+Stock                200 rows, 0 mismatches
+```
+
+600 of 600 rendered rows satisfy `Available = Current − Reserved`.
+
+## 12. A rendered row checked against the source row
+
+Application, `/stock?q=12AT60`:
+
+```
+12AT60 | DC12V LED Transformer Power Adaptor Driver ... 60W | UK Unit3 | -2 | 0 | -2 | Negative Inventory
+```
+
+Source:
+
+```sql
+SELECT p.sku, w.warehouse_name, s.quantity, s.reserved_quantity
+  FROM inventory.physical_product_stock s
+  JOIN inventory.products p ON p.id = s.inventory AND p.inventory_bool
+  LEFT JOIN inventory.warehouse w ON w.warehouse = s.warehouse
+ WHERE p.sku = '12AT60' ORDER BY s.warehouse;
+```
+
+```
+  sku   |     warehouse_name      | quantity | reserved_quantity
+--------+-------------------------+----------+-------------------
+ 12AT60 | UK Unit3                |       -2 |                 0
+ 12AT60 | France1                 |        0 |                 0
+ 12AT60 | Netherlands1            |        0 |                 0
+ 12AT60 | Canada1                 |        0 |                 0
+ 12AT60 | Duisburg warehouse      |        0 |                 0
+ 12AT60 | UK Unit18               |        0 |                 0
+ 12AT60 | Trossingen schmutter str|        0 |                 0
+ 12AT60 | UK Unit4                |        0 |                 0
+ 12AT60 | Trossingen kronen str   |        0 |                 0
+ 12AT60 | US1                     |        0 |                 0
+```
+
+All ten rows agree.
+
+## 13. Real product data on screen
+
+`/products` count line and first rows:
+
+```
+showing 200 of 6,510 products
+
+ FWS444BL        S4-44 blue Bata
+12ASIP20100      Constant voltage 12V LED Driver Power Supply Transformer ...
+12ASIP20150      Constant voltage 12V LED Driver Power Supply Transformer ...
+12ASIP20200      Constant voltage 12V LED Driver Power Supply Transformer ...
+```
+
+Image sources are the business's own product photographs from the source:
+
+```
+src="https://sin1.contabostorage.com/.../img/product_images/42215.jpg"
+src="https://sin1.contabostorage.com/.../img/product_images/2844.jpg"
+```
+
+Filter options, built from the real data rather than a declared list:
+
+```
+categories: 324 options   (323 real values from listings.shopify_listings.product_type, plus "All categories")
+suppliers:   45 options   (44 real values from suppliers.suppliers, plus "All suppliers")
+```
+
+A product view page, `/products/view?sku=12AT60`:
+
+```
+SKU                    12AT60
+Product name           DC12V LED Transformer Power Adaptor Driver for Led Strips MR 16 CCTV A++ - 60W
+Category               Constant Voltage Transformer
+Supplier               Not recorded
+Listing status         Inactive    (End-of-line status in the source: Permanent.)
+Units held             -2          (Across 10 stock lines. Totalled from the stock data, not stored here.)
+Units sold (90 days)   0
+```
+
+"Not recorded" is shown where the source holds nothing — never a blank or a zero.
+
+## 14. Empty screens explain themselves
+
+`/transfers`:
+
+```
+0 transfers
+ledsone holds no inter-warehouse transfer records, so there is nothing to show
+here. This screen reads the source; it does not create transfers.
+No transfers match these filters.
+```
+
+`/audit`:
+
+```
+0 audit lines
+ledsone holds no physical stock counts, so there is nothing to compare against
+the system figure. This screen reads the source; it does not record counts.
+No audit lines match these filters.
+```
+
+`/stock`:
+
+```
+Low Stock is flagged below 10 available. ledsone holds no minimum or reorder
+level for a SKU, so Low Stock is flagged against a single application-wide
+threshold instead.
+```
+
+## 15. Every link on every screen followed
+
+```
+links found: 619
+crawl complete - no output above means no broken links
+```
+
+### The defect this crawl found
+
+The first crawl returned 11 broken links:
+
+```
+BROKEN 404 /products/view?sku=%20FWS444BL
+BROKEN 404 /stock/view?sku=%20FWS444BL&warehouse=1
+BROKEN 404 /stock/view?sku=%20FWS444BL&warehouse=2
+... (nine more, one per warehouse)
+```
+
+Cause, confirmed in the source — seven real SKUs carry untrimmed whitespace:
+
+```sql
+SELECT '[' || sku || ']' AS sku_bracketed, length(sku) AS len, length(btrim(sku)) AS trimmed_len
+  FROM inventory.products WHERE inventory_bool AND sku <> btrim(sku);
+```
+
+```
+  sku_bracketed  | len | trimmed_len
+-----------------+-----+-------------
+ [ FWS444BL]     |   9 |           8
+ [CGSPBM ]       |   7 |           6
+ [CGSPWH ]       |   7 |           6
+ [IMWW ]         |   5 |           4
+ [RBLSDO300BI  ] |  13 |          11
+ [RBLSWG135YB ]  |  12 |          11
+ [WSLFS1002BM  ] |  13 |          11
+```
+
+The router trimmed every query parameter, so an href built from the real SKU was
+trimmed back to something matching nothing. Fixed by comparing identifiers
+exactly and trimming only filter text. Re-crawl: 619 links, 0 broken.
+
+## 16. Source database safety
+
+```sql
+SELECT has_table_privilege('varmen_user','inventory.products','INSERT')            AS can_insert,
+       has_table_privilege('varmen_user','inventory.products','UPDATE')            AS can_update,
+       has_table_privilege('varmen_user','inventory.products','DELETE')            AS can_delete,
+       has_table_privilege('varmen_user','inventory.physical_product_stock','UPDATE') AS can_update_stock,
+       has_schema_privilege('varmen_user','inventory','CREATE')                    AS can_create_in_schema,
+       has_database_privilege('varmen_user','ledsone','CREATE')                    AS can_create_schema,
+       (SELECT count(*) FROM information_schema.schemata
+         WHERE schema_name IN ('inventory_control','inventory_control_test'))      AS app_schemas,
+       (SELECT count(*) FROM inventory.products)               AS products,
+       (SELECT count(*) FROM inventory.physical_product_stock) AS stock_rows,
+       (SELECT count(*) FROM inventory.warehouse)              AS warehouses;
+```
+
+```
+ can_insert | can_update | can_delete | can_update_stock | can_create_in_schema | can_create_schema
+------------+------------+------------+------------------+----------------------+-------------------
+ false      | false      | false      | false            | false                | false
+
+ app_schemas | products | stock_rows | warehouses
+-------------+----------+------------+------------
+           0 |    44494 |      76683 |         10
+```
+
+No application schema was ever created in `ledsone`, and the role holds no
+write privilege of any kind.
+
+### About the `products` count
+
+`inventory.products` was 44,492 at the start of this work and 44,494 at the end.
+**This application did not add those rows and could not have** — `can_insert` is
+`false` above, the connection is read-only, and there is no INSERT statement in
+the codebase.
+
+`ledsone` is a live business database that other systems write to continuously.
+The two new rows are bundle SKUs created by the order/listing systems during the
+session:
+
+```sql
+SELECT id, sku, inventory_bool, created_at FROM inventory.products ORDER BY id DESC LIMIT 2;
+```
+
+```
+  id   |               sku                | inventory_bool |      created_at
+-------+----------------------------------+----------------+---------------------
+ 44503 | CRSF100BM+PHTT2PBRBM+WCDC10BM    | false          | 2026-09-11 09:39:07
+ 44502 | ENC10398                         | false          | 2026-09-11 09:13:04
+```
+
+Both carry `inventory_bool = false`, so neither is in this system's catalogue:
+
+```sql
+SELECT count(*) FROM inventory.products WHERE inventory_bool;
+```
+
+```
+ count
+-------
+  6510
+```
+
+The catalogue is **unchanged at 6,510**, and every figure in this document
+remains valid. This is what a read-only view over a live source looks like: the
+source moves, and the reader does not move it.
+
+## 17. No write SQL in the application
+
+```
+$ grep -rnoiE "\b(insert +into|update +[a-z_.\"]+ +set|delete +from|truncate|
+    create +(table|schema|database|index)|alter +table|drop +(table|schema))\b" inventory/*.js
+
+none
+```
+
+The only occurrences of those words anywhere in `inventory/` are inside comments
+in `db.js` explaining why they cannot happen.
+
+## 18. Demonstration data is unreachable from production
+
+Production modules importing `testdata/`:
+
+```
+inventory/server.js:0
+inventory/router.js:0
+inventory/render.js:0
+inventory/reports.js:0
+inventory/rules.js:0
+inventory/store.js:0
+inventory/source.js:0
+inventory/db.js:0
+```
+
+References to `varmen` in application code and `package.json`:
+
+```
+(none)
+```
+
+Configured source database:
+
+```
+$ grep ^DB_NAME inventory/.env
+DB_NAME=ledsone
+```
+
+Deleted, and confirmed absent:
+
+```
+gone: inventory/fixture
+gone: inventory/test.env
+gone: sql/001-inventory-control-schema.sql
+gone: inventory/crud.test.js
+gone: inventory/store.test.js
+gone: inventory/fixture.test.js
+```
+
+`package.json` scripts, with no `pretest` and no seed step:
+
+```json
+"scripts": {
+  "start": "node inventory/server.js",
+  "test": "node --test --test-concurrency=1 \"inventory/**/*.test.js\""
+}
+```
+
+## 19. Server stopped
+
+The server was stopped after verification. No background process was left
+running, and no connection to `ledsone` remains open.

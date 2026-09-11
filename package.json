@@ -2,16 +2,14 @@
   "name": "smart-inventory-control",
   "version": "0.1.0",
   "private": true,
-  "description": "Smart Inventory Control. Mini-AIOS standard repository for the inventory and stock control MVP, backed by PostgreSQL.",
+  "description": "Smart Inventory Control. Reports on the existing ledsone inventory database, read-only.",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "start": "node inventory/server.js",
-    "pretest": "node --env-file=inventory/test.env inventory/fixture/ensure-test-schema.js",
-    "test": "node --env-file=inventory/test.env --test --test-concurrency=1",
-    "seed:test": "node --env-file=inventory/test.env inventory/fixture/load.js"
+    "test": "node --test --test-concurrency=1 \"inventory/**/*.test.js\""
   },
   "dependencies": {
     "pg": "^8.23.0"

@@ -7,10 +7,11 @@
  * hands them to route(), and writes back what it gets. All the decisions live
  * in router.js, which is why they can be tested without a socket.
  *
- * Everything on screen comes from PostgreSQL, from the inventory_control schema
- * of the configured database. The connection is checked once at startup so a
- * misconfigured deployment fails here, with something readable, rather than on
- * the first page a member of staff opens.
+ * Everything on screen comes from `ledsone`, the existing business database,
+ * READ-ONLY. The connection is checked once at startup - reachable, correct
+ * database, read-only transaction mode in force, and no write privileges held -
+ * so a misconfigured deployment fails here, with something readable, rather
+ * than on the first page a member of staff opens.
  *
  * Start with:  npm start        (or: node inventory/server.js)
  */
@@ -78,12 +79,23 @@ function readForm(req) {
  * in an onchange attribute - an inline handler would need the CSP relaxed far
  * further than a same-origin file does.
  *
- * Images are the SVG thumbnails this server generates, so img-src is limited to
- * this origin too. Nothing external is ever loaded.
+ * img-src is this origin plus the one host the source database stores product
+ * photographs on. Those URLs are real data - the business's own product images,
+ * exactly as ledsone records them - so they are shown rather than replaced with
+ * a placeholder, and the host is named explicitly rather than allowing https:
+ * generally. A SKU with no photograph falls back to the SVG thumbnail this
+ * server draws, which is same-origin.
+ *
+ * form-action is 'none'. The application has no forms: the source database is
+ * read-only to it, so there is nothing to submit anywhere.
  */
+
+/** The host ledsone stores product images on. */
+export const IMAGE_HOST = 'https://sin1.contabostorage.com';
+
 const SECURITY_HEADERS = Object.freeze({
   'content-security-policy':
-    "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    `default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' ${IMAGE_HOST}; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`,
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
 });
@@ -111,23 +123,13 @@ export function createInventoryServer() {
       // The base is a placeholder: only the path and query are ever used.
       const url = new URL(req.url ?? '/', 'http://localhost');
 
+      // Nothing in this application submits a form - the source database is
+      // read-only to it - so a POST is always answered with the page that says
+      // so. The body is still read and discarded rather than left unconsumed,
+      // so the socket closes cleanly.
       if (req.method === 'POST') {
         const form = await readForm(req);
-        if (form === null) {
-          res.writeHead(400, { ...SECURITY_HEADERS, 'content-type': 'text/html; charset=utf-8' });
-          res.end(renderNotFoundPage());
-          return;
-        }
-
-        const result = await routeForm(url.pathname, form);
-
-        // A write that went through answers with a redirect, so the browser
-        // reloads the list with a fresh GET and refreshing cannot repeat it.
-        if (result.location) {
-          res.writeHead(303, { ...SECURITY_HEADERS, location: result.location });
-          res.end();
-          return;
-        }
+        const result = await routeForm(url.pathname, form ?? new URLSearchParams());
 
         res.writeHead(result.status, { ...SECURITY_HEADERS, 'content-type': result.contentType });
         res.end(result.body);
@@ -168,7 +170,8 @@ async function main() {
   server.listen(port, () => {
     console.log(`[inventory] Smart Inventory Control running on http://localhost:${port}/`);
     console.log(
-      `[inventory] data from PostgreSQL: ${where.database}, schema inventory_control, as ${where.user}.`,
+      `[inventory] reading ${where.database} as ${where.user} - ` +
+        `read-only connection: ${where.readOnly ? 'yes' : 'NO'}, no write privileges.`,
     );
   });
 
