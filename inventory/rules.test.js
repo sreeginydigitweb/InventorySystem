@@ -275,3 +275,91 @@ describe('detectIssues', () => {
     assert.match(issue.detail, /Over-reserved/);
   });
 });
+
+/*
+ * ONE CONDITION -> ONE LABEL
+ *
+ * The Alerts screen once appeared to report every row as "Negative Inventory".
+ * It turned out not to be a labelling fault - the labels were right and the
+ * rows simply could not be paged to - but the only way to keep that true is to
+ * pin each condition to the exact string it raises.
+ *
+ * Each case below builds a line that meets exactly one condition and asserts
+ * that detectIssues() raises that type, with that exact wording, and nothing
+ * else. A rule wired to the wrong label, or two rules firing on one line where
+ * only one should, fails here rather than on screen.
+ */
+describe('each condition raises its own issue type, and only that one', () => {
+  // An active, fast-selling product at a real site, so nothing fires unless the
+  // case below makes it fire.
+  const PRODUCT = Object.freeze({
+    sku: 'ONE-1',
+    name: 'Single condition',
+    active: true,
+    unitsSoldLast90Days: 100,
+    approvedWarehouses: null,
+  });
+
+  const WAREHOUSE = Object.freeze({ id: 'W1', name: 'Main Depot', location: 'Leeds' });
+
+  const only = (product, stockLine) => {
+    const issues = detectIssues([stockLine], makeCatalogue([product], [WAREHOUSE]));
+    return issues.map((issue) => issue.type);
+  };
+
+  const at = (onHand, reserved = 0, warehouseId = 'W1') => ({
+    sku: 'ONE-1',
+    warehouseId,
+    onHand,
+    reserved,
+  });
+
+  test('Negative Inventory, and not Out of Stock as well', () => {
+    assert.deepEqual(only(PRODUCT, at(-5)), ['Negative Inventory']);
+  });
+
+  test('Out of Stock', () => {
+    assert.deepEqual(only(PRODUCT, at(0)), ['Out of Stock']);
+  });
+
+  test('Low Stock at the threshold, which is inclusive', () => {
+    assert.deepEqual(only(PRODUCT, at(10)), ['Low Stock']);
+    assert.deepEqual(only(PRODUCT, at(1)), ['Low Stock']);
+    assert.deepEqual(only(PRODUCT, at(11)), [], '11 available is not low');
+  });
+
+  test('Warehouse/SKU Mismatch when the site is not a real warehouse', () => {
+    assert.deepEqual(only(PRODUCT, at(50, 0, 'W-GONE')), ['Warehouse/SKU Mismatch']);
+  });
+
+  test('Inactive Listing when a withdrawn listing still holds stock', () => {
+    const withdrawn = { ...PRODUCT, active: false };
+    assert.deepEqual(only(withdrawn, at(20)), ['Inactive Listing']);
+  });
+
+  test('Slow-Moving Stock when an active product has barely sold', () => {
+    const stale = { ...PRODUCT, unitsSoldLast90Days: 0 };
+    assert.deepEqual(only(stale, at(30)), ['Slow-Moving Stock']);
+  });
+
+  test('every raised type is one of the six declared ones, spelled exactly', () => {
+    const cases = [
+      [PRODUCT, at(-5)],
+      [PRODUCT, at(0)],
+      [PRODUCT, at(5)],
+      [PRODUCT, at(50, 0, 'W-GONE')],
+      [{ ...PRODUCT, active: false }, at(20)],
+      [{ ...PRODUCT, unitsSoldLast90Days: 0 }, at(30)],
+    ];
+
+    const raised = new Set();
+    for (const [product, stockLine] of cases) {
+      for (const type of only(product, stockLine)) {
+        assert.ok(ISSUE_TYPES.includes(type), `${type} is not a declared issue type`);
+        raised.add(type);
+      }
+    }
+
+    assert.deepEqual([...raised].sort(), [...ISSUE_TYPES].sort(), 'a type was never raised');
+  });
+});

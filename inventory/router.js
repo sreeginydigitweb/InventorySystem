@@ -156,16 +156,40 @@ function allowedValue(value, allowed) {
 }
 
 /**
- * Case-insensitive substring match across a row's searchable fields.
+ * Case-insensitive partial match across a row's searchable fields.
  *
- * @param {string} needle
- * @param {readonly string[]} haystacks
+ * ---------------------------------------------------------------------------
+ * WHAT THIS DELIBERATELY IS
+ *
+ * A plain substring test, ORed across the fields the screen says it searches.
+ * "kettle" finds "Copper Kettle Shade"; "abc123" finds SKU "ABC123"; a term
+ * matching nothing returns nothing rather than everything.
+ *
+ * It is String.prototype.includes, NOT a regular expression, and that is the
+ * point: a search box is user input, and a term like `.*`, `(`, `[a-z` or
+ * `\` is treated as those literal characters instead of being compiled into a
+ * pattern. So there is no regex injection, no catastrophic backtracking on a
+ * hostile term, and no "why did searching for ( crash the page".
+ *
+ * An empty term matches everything, so clearing the box returns the normally
+ * filtered list rather than an empty screen.
+ *
+ * Null and undefined fields - a product with no category, a stock line with no
+ * shelf - are treated as empty text rather than skipped or stringified into
+ * "null", so they simply never match.
+ *
+ * @param {string} needle     Already trimmed by param().
+ * @param {readonly unknown[]} haystacks
  * @returns {boolean}
  */
 function matchesSearch(needle, haystacks) {
   if (!needle) return true;
   const term = needle.toLowerCase();
-  return haystacks.some((value) => String(value ?? '').toLowerCase().includes(term));
+
+  return haystacks.some((value) => {
+    if (value === null || value === undefined) return false;
+    return String(value).toLowerCase().includes(term);
+  });
 }
 
 /**
@@ -257,7 +281,9 @@ async function productsRoute(query) {
 
   const products = all.filter(
     (product) =>
-      matchesSearch(search, [product.sku, product.name, product.supplier]) &&
+      // SKU, name, category and supplier - the four columns the screen shows
+      // and the four the placeholder promises.
+      matchesSearch(search, [product.sku, product.name, product.category, product.supplier]) &&
       (!category || product.category === category) &&
       (!supplier || product.supplier === supplier) &&
       (!stock || product.stockStatus === stock),
@@ -292,7 +318,16 @@ async function stockRoute(query) {
 
   const lines = all.filter(
     (line) =>
-      matchesSearch(search, [line.sku, line.productName]) &&
+      // SKU, product, warehouse, and the shelf and bulk locations where the
+      // source records them - so "UK Unit3" finds a site's stock and "R01-S14"
+      // finds what is on that shelf.
+      matchesSearch(search, [
+        line.sku,
+        line.productName,
+        line.warehouseName,
+        line.shelfLocation,
+        line.bulkLocation,
+      ]) &&
       (!warehouseId || line.warehouseId === warehouseId) &&
       (!status || line.status === status),
   );
@@ -320,12 +355,25 @@ async function stockRoute(query) {
 async function alertsRoute(query) {
   const data = await snapshot();
   const all = await issuesReport(data);
+  const search = param(query, 'q');
   const type = allowedValue(param(query, 'type'), ISSUE_TYPES);
   const warehouseId = allowedValue(param(query, 'warehouse'), idsOf(data.warehouses));
 
+  // Searched over the WHOLE issue set - all 67,747 of them - before the page
+  // window is taken. Issues are derived, not stored, so there is no table to
+  // search; the rules have already produced every issue by this point and the
+  // search narrows that result.
   const issues = all.filter(
     (issue) =>
-      (!type || issue.type === type) && (!warehouseId || issue.warehouseId === warehouseId),
+      matchesSearch(search, [
+        issue.sku,
+        issue.productName,
+        issue.warehouseName,
+        issue.type,
+        issue.detail,
+      ]) &&
+      (!type || issue.type === type) &&
+      (!warehouseId || issue.warehouseId === warehouseId),
   );
 
   const view = windowOf(issues, pageParam(query));
@@ -334,11 +382,12 @@ async function alertsRoute(query) {
     renderIssuesPage({
       issues: view.rows,
       view,
-      params: { type, warehouse: warehouseId },
+      params: { q: search, type, warehouse: warehouseId },
       total: all.length,
       matched: issues.length,
       issueTypes: ISSUE_TYPES,
       warehouses: data.warehouses,
+      search,
       type,
       warehouseId,
     }),

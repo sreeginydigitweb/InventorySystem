@@ -58,12 +58,20 @@ function shownCount(body) {
   assert.ok(match, 'the page has no count line');
 
   const text = match[1].replaceAll(',', '');
-  const capped = text.match(/^showing (\d+) of (\d+)/);
+
+  // Four shapes, and this reads all of them:
+  //   "22 issues"                                       one page, unfiltered
+  //   "showing 1–200 of 255 issues"                     paged, unfiltered
+  //   "3 issues matching, out of 22"                    one page, filtered
+  //   "showing 1–200 of 250 issues matching, out of 255"  paged and filtered
+  const paged = text.match(/^showing (\d+)–(\d+) of (\d+)/);
   const plain = text.match(/^(\d+)/);
   const outOf = text.match(/out of (\d+)/);
 
-  const shown = Number(capped ? capped[1] : plain[1]);
-  const matched = Number(capped ? capped[2] : plain[1]);
+  assert.ok(paged || plain, `unreadable count line: ${JSON.stringify(match[1])}`);
+
+  const shown = paged ? Number(paged[2]) - Number(paged[1]) + 1 : Number(plain[1]);
+  const matched = paged ? Number(paged[3]) : Number(plain[1]);
 
   return { shown, matched, total: Number(outOf ? outOf[1] : matched) };
 }
@@ -424,7 +432,11 @@ describe('products screen', () => {
   test('an unmatched search shows an empty state, not a broken table', async () => {
     const { body } = await get('/products', 'q=zzzznothing');
     assert.equal(shownCount(body).shown, 0);
-    assert.match(body, /No products match these filters/);
+
+    // The term is quoted back, so a typo is obvious rather than looking like a
+    // screen that simply does not work.
+    assert.match(body, /No products match/);
+    assert.ok(body.includes('zzzznothing'), 'the empty state does not name the term searched for');
   });
 
   test('the SKU stock points at but the catalogue does not hold is still reported', async () => {
@@ -882,5 +894,423 @@ describe('the list screens carry no explanatory boxes', () => {
       assert.equal(response.location, undefined, `${path} redirected as if it had written`);
       assert.match(response.body, /does not change it/, `${path} did not explain itself`);
     }
+  });
+});
+
+/*
+ * SEARCH
+ *
+ * Three things had to hold and did not:
+ *
+ *   - Alerts had no search at all - no `q` parameter was read and no box was
+ *     rendered;
+ *   - Products searched SKU, name and supplier but not category;
+ *   - Warehouse Stock searched SKU and product name only, so a warehouse name
+ *     or a shelf reference found nothing.
+ *
+ * The cases below pin all three down, and - because Alerts carries tens of
+ * thousands of issues in the real data - prove that the search runs over the
+ * WHOLE set before the page window is taken, not over the 200 rows that happen
+ * to be on screen.
+ */
+describe('search', () => {
+  /** Rows rendered in a screen's table body. */
+  const rowsOf = (body) => {
+    const tbody = body.split('<tbody>')[1]?.split('</tbody>')[0] ?? '';
+    return tbody.split('<tr').slice(1);
+  };
+
+  describe('products', () => {
+    test('an exact SKU finds that product', async () => {
+      const { body } = await get('/products', 'q=SIC-1001');
+      assert.equal(shownCount(body).matched, 1);
+      assert.ok(body.includes('SIC-1001'));
+    });
+
+    test('a partial product name matches', async () => {
+      const target = PRODUCTS[0];
+      const fragment = target.name.slice(2, 8);
+      const { body } = await get('/products', `q=${encodeURIComponent(fragment)}`);
+
+      assert.ok(shownCount(body).matched > 0, `"${fragment}" matched no product`);
+      assert.ok(
+        rowsOf(body).some((row) => row.includes(target.sku)),
+        'the product the fragment came from is not in the results',
+      );
+    });
+
+    test('search is case-insensitive', async () => {
+      const lower = shownCount((await get('/products', 'q=sic-1001')).body).matched;
+      const upper = shownCount((await get('/products', 'q=SIC-1001')).body).matched;
+      const mixed = shownCount((await get('/products', 'q=SiC-1001')).body).matched;
+
+      assert.equal(lower, upper);
+      assert.equal(upper, mixed);
+      assert.equal(lower, 1);
+    });
+
+    test('category is searchable, not just SKU, name and supplier', async () => {
+      const withCategory = PRODUCTS.find((p) => p.category);
+      const { body } = await get('/products', `q=${encodeURIComponent(withCategory.category)}`);
+
+      assert.ok(
+        rowsOf(body).some((row) => row.includes(withCategory.sku)),
+        'searching a category finds nothing - category is not being searched',
+      );
+    });
+
+    test('supplier is searchable', async () => {
+      const withSupplier = PRODUCTS.find((p) => p.supplier);
+      const { body } = await get('/products', `q=${encodeURIComponent(withSupplier.supplier)}`);
+      assert.ok(rowsOf(body).some((row) => row.includes(withSupplier.sku)));
+    });
+
+    test('a term matching nothing returns nothing, not everything', async () => {
+      const { body } = await get('/products', 'q=zzz-no-such-product-zzz');
+      assert.equal(shownCount(body).matched, 0);
+      assert.equal(rowsOf(body).length, 0);
+    });
+
+    test('search narrows alongside a dropdown filter rather than replacing it', async () => {
+      const target = PRODUCTS[0];
+      const band = shownCount((await get('/products', 'stock=Healthy')).body).matched;
+      const both = await get('/products', `stock=Healthy&q=${encodeURIComponent(target.sku)}`);
+
+      assert.ok(shownCount(both.body).matched <= band, 'search widened the filtered set');
+
+      // Both controls come back still set, so the bar reflects the list.
+      assert.match(both.body, /<option value="Healthy" selected>/);
+      assert.ok(both.body.includes(`value="${target.sku}"`), 'the search box lost its term');
+    });
+  });
+
+  describe('warehouse stock', () => {
+    test('a SKU finds its stock rows', async () => {
+      const { body } = await get('/stock', 'q=SIC-1001');
+
+      assert.ok(shownCount(body).matched > 0);
+      assert.ok(rowsOf(body).every((row) => row.includes('SIC-1001')));
+    });
+
+    test('a warehouse name finds that site stock', async () => {
+      const site = WAREHOUSES[0];
+      const { body } = await get('/stock', `q=${encodeURIComponent(site.name)}`);
+      const matched = shownCount(body).matched;
+
+      assert.ok(matched > 0, `searching "${site.name}" found no stock - warehouse is not searched`);
+
+      const filtered = shownCount((await get('/stock', `warehouse=${site.id}`)).body).matched;
+      assert.equal(matched, filtered, 'searching a site disagrees with filtering to it');
+    });
+
+    test('a partial warehouse name matches', async () => {
+      const site = WAREHOUSES[0];
+      const fragment = site.name.slice(0, 4);
+      const { body } = await get('/stock', `q=${encodeURIComponent(fragment)}`);
+      assert.ok(shownCount(body).matched > 0, `"${fragment}" matched no stock`);
+    });
+
+    test('search is case-insensitive', async () => {
+      const site = WAREHOUSES[0];
+      const lower = shownCount(
+        (await get('/stock', `q=${encodeURIComponent(site.name.toLowerCase())}`)).body,
+      ).matched;
+      const upper = shownCount(
+        (await get('/stock', `q=${encodeURIComponent(site.name.toUpperCase())}`)).body,
+      ).matched;
+
+      assert.ok(lower > 0);
+      assert.equal(lower, upper);
+    });
+
+    test('a term matching nothing returns nothing', async () => {
+      const { body } = await get('/stock', 'q=zzz-no-such-shelf-zzz');
+      assert.equal(shownCount(body).matched, 0);
+      assert.equal(rowsOf(body).length, 0);
+    });
+
+    test('search narrows alongside the warehouse and status filters', async () => {
+      const site = WAREHOUSES[0];
+      const base = shownCount((await get('/stock', `warehouse=${site.id}`)).body).matched;
+      const both = await get('/stock', `warehouse=${site.id}&q=SIC-1001`);
+
+      assert.ok(shownCount(both.body).matched > 0);
+      assert.ok(shownCount(both.body).matched <= base, 'search widened the filtered set');
+      assert.ok(both.body.includes('value="SIC-1001"'), 'the search box lost its term');
+    });
+  });
+
+  describe('alerts', () => {
+    test('an issue type is searchable as free text', async () => {
+      const { body } = await get('/alerts', 'q=Negative+Inventory');
+      const types = new Set(renderedIssueTypes(body));
+
+      assert.ok(shownCount(body).matched > 0, 'searching an issue type found nothing');
+      assert.deepEqual([...types], ['Negative Inventory']);
+    });
+
+    test('a SKU finds the issues raised against it', async () => {
+      const { body } = await get('/alerts', 'q=SIC-3003');
+      assert.ok(shownCount(body).matched > 0);
+      assert.ok(rowsOf(body).every((row) => row.includes('SIC-3003')));
+    });
+
+    test('a warehouse name finds that site issues', async () => {
+      const { body } = await get('/alerts', 'q=Manchester');
+
+      assert.ok(shownCount(body).matched > 0, 'searching a warehouse name found no issues');
+      assert.ok(rowsOf(body).every((row) => row.includes('Manchester North')));
+    });
+
+    test('the reason text is searchable', async () => {
+      const { body } = await get('/alerts', 'q=below+zero');
+      assert.ok(shownCount(body).matched > 0, 'the reason column is not searched');
+    });
+
+    test('search is case-insensitive and partial', async () => {
+      const exact = shownCount((await get('/alerts', 'q=Negative+Inventory')).body).matched;
+      const lower = shownCount((await get('/alerts', 'q=negative+inventory')).body).matched;
+      const partial = shownCount((await get('/alerts', 'q=negativ')).body).matched;
+
+      assert.equal(exact, lower);
+      assert.ok(partial >= exact, 'a partial term matched fewer rows than the whole one');
+    });
+
+    test('a term matching nothing returns nothing', async () => {
+      const { body } = await get('/alerts', 'q=zzz-no-such-issue-zzz');
+      assert.equal(shownCount(body).matched, 0);
+      assert.equal(renderedIssueTypes(body).length, 0);
+    });
+
+    test('search narrows alongside the issue-type filter', async () => {
+      const typeOnly = shownCount((await get('/alerts', 'type=Negative+Inventory')).body).matched;
+      const both = await get('/alerts', 'type=Negative+Inventory&q=SIC-3003');
+
+      assert.ok(shownCount(both.body).matched > 0);
+      assert.ok(shownCount(both.body).matched <= typeOnly, 'search widened the filtered set');
+      assert.match(both.body, /<option value="Negative Inventory" selected>/);
+      assert.ok(both.body.includes('value="SIC-3003"'), 'the search box lost its term');
+    });
+
+    test('a search term with regex metacharacters is treated literally', async () => {
+      const everything = shownCount((await get('/alerts')).body).matched;
+
+      // Terms that no row contains as literal text, but which a regular
+      // expression would match almost every row with. Matching nothing is the
+      // proof that the term is not being compiled into a pattern.
+      for (const term of ['.*', '[a-z', '.+', '^N']) {
+        const { status, body } = await get('/alerts', `q=${encodeURIComponent(term)}`);
+
+        assert.equal(status, 200, `searching ${JSON.stringify(term)} did not render`);
+        assert.equal(
+          shownCount(body).matched,
+          0,
+          `${JSON.stringify(term)} was treated as a pattern, not literal text`,
+        );
+      }
+
+      // Terms that are invalid regular expressions. A regex engine would throw
+      // on these; a substring test simply reports what it finds. The only
+      // requirement is that the page renders and does not match the whole set.
+      for (const term of ['(', '\\', '++', '?', '[']) {
+        const { status, body } = await get('/alerts', `q=${encodeURIComponent(term)}`);
+
+        assert.equal(status, 200, `searching ${JSON.stringify(term)} did not render`);
+        assert.ok(
+          shownCount(body).matched < everything,
+          `${JSON.stringify(term)} matched everything`,
+        );
+      }
+    });
+  });
+});
+
+/*
+ * SEARCH RUNS BEFORE PAGINATION, NOT AFTER IT
+ *
+ * The required order is:
+ *
+ *   real data -> filter/search -> sort -> take a 200-row page -> render
+ *
+ * and NOT:
+ *
+ *   real data -> take the first 200 -> search those 200
+ *
+ * The difference is invisible on a small dataset, so these cases build a source
+ * of 250 matching records - more than one page - plus decoys, and then search
+ * for something that only exists BEYOND the first page. If the search ran after
+ * the page window, those cases would return nothing.
+ */
+describe('search runs over the whole set, before the page window', () => {
+  const MATCHING = 250;
+  // Named so it shares no text with the product token being searched for -
+  // otherwise every row would match 'kettle' through its warehouse name.
+  const SITE = { id: 'W1', name: 'Leeds Depot', location: 'Leeds' };
+
+  const products = [];
+  const stockLines = [];
+
+  // 250 products whose name carries a shared token, each holding negative
+  // stock, so each also raises exactly one issue.
+  for (let i = 0; i < MATCHING; i += 1) {
+    const sku = `KET-${String(i).padStart(3, '0')}`;
+    products.push({
+      sku,
+      name: `Copper Kettle Shade ${i}`,
+      image: null,
+      category: 'Kitchenware',
+      supplier: 'Brassware Supply Co',
+      active: true,
+      endOfLineStatus: null,
+      unitsSoldLast90Days: 100,
+      approvedWarehouses: null,
+    });
+    stockLines.push({ sku, warehouseId: 'W1', onHand: -1, reserved: 0 });
+  }
+
+  // Decoys sharing none of the searchable text.
+  for (let i = 0; i < 5; i += 1) {
+    const sku = `ZZZ-${i}`;
+    products.push({
+      sku,
+      name: `Unrelated Lamp ${i}`,
+      image: null,
+      category: 'Lighting',
+      supplier: 'Other Supplier',
+      active: true,
+      endOfLineStatus: null,
+      unitsSoldLast90Days: 100,
+      approvedWarehouses: null,
+    });
+    stockLines.push({ sku, warehouseId: 'W1', onHand: -1, reserved: 0 });
+  }
+
+  // A SKU that sorts late, so it is NOT on page one of any unfiltered list.
+  const DEEP_SKU = 'KET-240';
+
+  before(() =>
+    useSource(
+      memorySource({
+        products,
+        warehouses: [SITE],
+        stockLines,
+        transfers: [],
+        auditCounts: [],
+      }),
+    ),
+  );
+
+  after(() =>
+    useSource(
+      memorySource({
+        products: PRODUCTS,
+        warehouses: WAREHOUSES,
+        stockLines: STOCK_LINES,
+        transfers: TRANSFERS,
+        auditCounts: AUDIT_COUNTS,
+      }),
+    ),
+  );
+
+  for (const [screen, path, noun] of [
+    ['products', '/products', 'products'],
+    ['warehouse stock', '/stock', 'stock lines'],
+    ['alerts', '/alerts', 'issues'],
+  ]) {
+    describe(screen, () => {
+      test('a record beyond page one is still found', async () => {
+        // The proof. KET-240 sits past the 200-row window of the unfiltered
+        // list, so a search applied to the visible page could never find it.
+        const unfiltered = await get(path);
+        assert.ok(!unfiltered.body.includes(DEEP_SKU), `${DEEP_SKU} is already on page one`);
+
+        const { body } = await get(path, `q=${DEEP_SKU}`);
+        assert.equal(shownCount(body).matched, 1, `${DEEP_SKU} was not found by search`);
+        assert.ok(body.includes(DEEP_SKU));
+      });
+
+      test('a term matching more than one page reports the full count', async () => {
+        const { body } = await get(path, 'q=kettle');
+
+        assert.equal(
+          shownCount(body).matched,
+          MATCHING,
+          'the count is the page, not the whole matching set',
+        );
+        assert.equal(shownCount(body).shown, 200, 'page one is not a full page');
+        assert.match(body, /showing 1–200 of 250/);
+      });
+
+      test('paging through a search reaches every match, and only matches', async () => {
+        let seen = 0;
+        let page = 1;
+
+        for (;;) {
+          const { status, body } = await get(path, `q=kettle&page=${page}`);
+          assert.equal(status, 200, `page ${page} did not render`);
+
+          const tbody = body.split('<tbody>')[1]?.split('</tbody>')[0] ?? '';
+          const rows = tbody.split('<tr').slice(1);
+          seen += rows.length;
+
+          for (const row of rows) {
+            assert.ok(!row.includes('ZZZ-'), 'a non-matching decoy appeared in the results');
+          }
+
+          if (!body.includes('rel="next"')) break;
+          page += 1;
+          assert.ok(page < 10, 'pager did not terminate');
+        }
+
+        assert.equal(seen, MATCHING, 'paging a search did not reach every match');
+      });
+
+      test('the pager carries the search term', async () => {
+        const { body } = await get(path, 'q=kettle');
+        const next = body.match(/rel="next" href="([^"]+)"/)?.[1].replaceAll('&amp;', '&');
+
+        assert.ok(next, 'a 250-match search offers no next page');
+        assert.ok(next.includes('q=kettle'), 'the next link drops the search term');
+
+        const url = new URL(next, 'http://localhost');
+        const second = await route(url.pathname, url.searchParams);
+
+        assert.equal(shownCount(second.body).matched, MATCHING, 'page two lost the search');
+        assert.ok(second.body.includes('value="kettle"'), 'page two lost the search box value');
+      });
+
+      test('the search box keeps its term so the screen matches the list', async () => {
+        const { body } = await get(path, 'q=kettle');
+        assert.ok(body.includes('value="kettle"'), 'the search box came back empty');
+      });
+
+      void noun;
+    });
+  }
+
+  test('products: searching a category reaches past page one', async () => {
+    const { body } = await get('/products', 'q=Kitchenware');
+    assert.equal(shownCount(body).matched, MATCHING);
+  });
+
+  test('stock: searching the warehouse name reaches past page one', async () => {
+    const { body } = await get('/stock', 'q=Leeds Depot');
+    assert.equal(shownCount(body).matched, MATCHING + 5, 'every line is at that site');
+  });
+
+  test('alerts: searching an issue type reaches past page one', async () => {
+    const { body } = await get('/alerts', 'q=Negative Inventory');
+    assert.equal(shownCount(body).matched, MATCHING + 5);
+  });
+
+  test('alerts: search and the issue-type filter narrow together across pages', async () => {
+    const { body } = await get('/alerts', 'q=kettle&type=Negative+Inventory');
+
+    assert.equal(shownCount(body).matched, MATCHING);
+    assert.match(body, /<option value="Negative Inventory" selected>/);
+
+    const next = body.match(/rel="next" href="([^"]+)"/)?.[1].replaceAll('&amp;', '&');
+    assert.ok(next.includes('q=kettle'), 'the next link drops the search');
+    assert.ok(next.includes('type=Negative'), 'the next link drops the type filter');
   });
 });

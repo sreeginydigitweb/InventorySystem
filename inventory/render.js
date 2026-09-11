@@ -661,6 +661,23 @@ function renderFilters({ action, controls, showReset }) {
  * @param {string} emptyMessage
  * @returns {string}
  */
+/**
+ * What an empty table says.
+ *
+ * When a search is running, the term is quoted back. "No issues match these
+ * filters" leaves a member of staff wondering whether the search worked at all;
+ * "No issues match “ktetle”." shows the typo straight away.
+ *
+ * @param {string} noun    Plural, as it appears in the count line.
+ * @param {string} search  The active search term, or ''.
+ * @returns {string}
+ */
+function noMatches(noun, search) {
+  return search
+    ? `No ${noun} match “${search}”. Try a shorter term, or clear the filters.`
+    : `No ${noun} match these filters.`;
+}
+
 function tableOrEmpty(rows, head, emptyMessage) {
   if (!rows) {
     return `    <p class="empty">${escapeHtml(emptyMessage)}</p>`;
@@ -1075,7 +1092,7 @@ export function renderProductsPage({
     action: '/products',
     showReset: Boolean(search || category || supplier || stock),
     controls: [
-      { kind: 'search', name: 'q', label: 'Search', value: search, placeholder: 'SKU, name or supplier' },
+      { kind: 'search', name: 'q', label: 'Search', value: search, placeholder: 'SKU, name, category or supplier' },
       {
         name: 'category',
         label: 'Category',
@@ -1104,7 +1121,7 @@ export function renderProductsPage({
   const body = `${filters}
 ${countLine(view, matched, total, 'product')}
 ${pager('/products', params, view)}
-${tableOrEmpty(rows, head, 'No products match these filters.')}
+${tableOrEmpty(rows, head, noMatches('products', search))}
 ${pager('/products', params, view)}`;
 
   return layout({
@@ -1182,7 +1199,7 @@ export function renderStockPage({
     action: '/stock',
     showReset: Boolean(warehouseId || status || search),
     controls: [
-      { kind: 'search', name: 'q', label: 'Search', value: search, placeholder: 'SKU or product name' },
+      { kind: 'search', name: 'q', label: 'Search', value: search, placeholder: 'SKU, product, warehouse or shelf' },
       {
         name: 'warehouse',
         label: 'Warehouse',
@@ -1204,7 +1221,7 @@ export function renderStockPage({
 ${countLine(view, matched, total, 'stock line')}
 ${pager('/stock', params, view)}
 ${sourceNote(note ? `Low Stock is flagged below ${number(threshold)} available. ${note}` : '')}
-${tableOrEmpty(rows, head, 'No stock lines match these filters.')}
+${tableOrEmpty(rows, head, noMatches('stock lines', search))}
 ${pager('/stock', params, view)}`;
 
   return layout({
@@ -1228,6 +1245,7 @@ export function renderIssuesPage({
   matched,
   issueTypes,
   warehouses,
+  search = '',
   type = '',
   warehouseId = '',
   flash = null,
@@ -1258,8 +1276,15 @@ export function renderIssuesPage({
 
   const filters = renderFilters({
     action: '/alerts',
-    showReset: Boolean(type || warehouseId),
+    showReset: Boolean(search || type || warehouseId),
     controls: [
+      {
+        kind: 'search',
+        name: 'q',
+        label: 'Search',
+        value: search,
+        placeholder: 'SKU, product, warehouse, issue or reason',
+      },
       {
         name: 'type',
         label: 'Issue type',
@@ -1280,7 +1305,7 @@ export function renderIssuesPage({
   const body = `${filters}
 ${countLine(view, matched, total, 'issue')}
 ${pager('/alerts', params, view)}
-${tableOrEmpty(rows, head, 'No issues match these filters.')}
+${tableOrEmpty(rows, head, noMatches('issues', search))}
 ${pager('/alerts', params, view)}`;
 
   return layout({
