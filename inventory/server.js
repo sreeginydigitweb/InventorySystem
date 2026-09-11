@@ -7,8 +7,10 @@
  * hands them to route(), and writes back what it gets. All the decisions live
  * in router.js, which is why they can be tested without a socket.
  *
- * There is no database and no network call anywhere in this system. Everything
- * on screen comes from the dummy dataset in ./data, loaded from disk at import.
+ * Everything on screen comes from PostgreSQL, from the inventory_control schema
+ * of the configured database. The connection is checked once at startup so a
+ * misconfigured deployment fails here, with something readable, rather than on
+ * the first page a member of staff opens.
  *
  * Start with:  npm start        (or: node inventory/server.js)
  */
@@ -17,6 +19,7 @@ import { createServer } from 'node:http';
 
 import { route, routeForm } from './router.js';
 import { renderNotFoundPage } from './render.js';
+import { checkConnection, closePool } from './db.js';
 
 /** Port used when INVENTORY_PORT is not set. */
 export const DEFAULT_PORT = 3000;
@@ -116,7 +119,7 @@ export function createInventoryServer() {
           return;
         }
 
-        const result = routeForm(url.pathname, form);
+        const result = await routeForm(url.pathname, form);
 
         // A write that went through answers with a redirect, so the browser
         // reloads the list with a fresh GET and refreshing cannot repeat it.
@@ -131,7 +134,7 @@ export function createInventoryServer() {
         return;
       }
 
-      const { status, contentType, body } = route(url.pathname, url.searchParams);
+      const { status, contentType, body } = await route(url.pathname, url.searchParams);
 
       res.writeHead(status, { ...SECURITY_HEADERS, 'content-type': contentType });
       res.end(req.method === 'HEAD' ? undefined : body);
@@ -145,17 +148,35 @@ export function createInventoryServer() {
 }
 
 /* c8 ignore start - entry point, exercised by running the server */
-function main() {
+async function main() {
   const port = Number(process.env.INVENTORY_PORT ?? DEFAULT_PORT);
+
+  // Fail here, with something readable, rather than on the first page a member
+  // of staff opens.
+  let where;
+  try {
+    where = await checkConnection();
+  } catch (error) {
+    console.error('[inventory] cannot start:', error.message);
+    process.exitCode = 1;
+    await closePool();
+    return;
+  }
+
   const server = createInventoryServer();
 
   server.listen(port, () => {
     console.log(`[inventory] Smart Inventory Control running on http://localhost:${port}/`);
-    console.log('[inventory] dummy data only - no database, no live inventory source.');
+    console.log(
+      `[inventory] data from PostgreSQL: ${where.database}, schema inventory_control, as ${where.user}.`,
+    );
   });
 
   const shutdown = () => {
-    server.close(() => process.exit(0));
+    server.close(async () => {
+      await closePool();
+      process.exit(0);
+    });
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

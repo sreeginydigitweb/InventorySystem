@@ -28,11 +28,21 @@ import {
   isNegativeInventory,
   isOutOfStock,
   isSlowMoving,
+  makeCatalogue,
   stockStatus,
   warehouseMismatchReason,
 } from './rules.js';
-import { STOCK_LINES } from './data/stock.js';
-import { PRODUCTS } from './data/products.js';
+import { STOCK_LINES } from './fixture/stock.js';
+import { PRODUCTS } from './fixture/products.js';
+import { WAREHOUSES } from './fixture/warehouses.js';
+
+/*
+ * The three rules that ask what a SKU or a warehouse IS are given a catalogue
+ * rather than importing one. That is what lets the same rules run against the
+ * database in the application and against this fixed dataset here, with no
+ * database in sight - the rules never learn where the rows came from.
+ */
+const catalogue = makeCatalogue(PRODUCTS, WAREHOUSES);
 
 /** A stock line, healthy unless the test overrides something. */
 function line(overrides = {}) {
@@ -136,66 +146,66 @@ describe('stockStatus', () => {
 
 describe('warehouse/SKU mismatch', () => {
   test('passes a SKU held at an approved site', () => {
-    assert.equal(warehouseMismatchReason({ sku: 'SIC-1001', warehouseId: 'WH-BIR' }), null);
+    assert.equal(warehouseMismatchReason({ sku: 'SIC-1001', warehouseId: 'WH-BIR' }, catalogue), null);
   });
 
   test('reports a warehouse that does not exist', () => {
-    const reason = warehouseMismatchReason({ sku: 'SIC-3002', warehouseId: 'WH-XXX' });
+    const reason = warehouseMismatchReason({ sku: 'SIC-3002', warehouseId: 'WH-XXX' }, catalogue);
     assert.match(reason, /not a recognised warehouse/);
   });
 
   test('reports a SKU that is not in the catalogue', () => {
-    const reason = warehouseMismatchReason({ sku: 'SIC-9999', warehouseId: 'WH-BIR' });
+    const reason = warehouseMismatchReason({ sku: 'SIC-9999', warehouseId: 'WH-BIR' }, catalogue);
     assert.match(reason, /not in the product catalogue/);
   });
 
   test('reports a real SKU held at a site it is not approved for', () => {
-    const reason = warehouseMismatchReason({ sku: 'SIC-1001', warehouseId: 'WH-LDS' });
+    const reason = warehouseMismatchReason({ sku: 'SIC-1001', warehouseId: 'WH-LDS' }, catalogue);
     assert.match(reason, /not approved to be held at/);
   });
 
   test('checks the warehouse before the SKU, so an unknown warehouse is named first', () => {
-    const reason = warehouseMismatchReason({ sku: 'SIC-9999', warehouseId: 'WH-XXX' });
+    const reason = warehouseMismatchReason({ sku: 'SIC-9999', warehouseId: 'WH-XXX' }, catalogue);
     assert.match(reason, /not a recognised warehouse/);
   });
 });
 
 describe('inactive listing', () => {
   test('fires when a withdrawn listing is still holding stock', () => {
-    assert.equal(isInactiveListing({ sku: 'SIC-4003', onHand: 26 }), true);
+    assert.equal(isInactiveListing({ sku: 'SIC-4003', onHand: 26 }, catalogue), true);
   });
 
   test('does not fire when a withdrawn listing holds nothing', () => {
-    assert.equal(isInactiveListing({ sku: 'SIC-4003', onHand: 0 }), false);
+    assert.equal(isInactiveListing({ sku: 'SIC-4003', onHand: 0 }, catalogue), false);
   });
 
   test('does not fire for an active listing', () => {
-    assert.equal(isInactiveListing({ sku: 'SIC-1001', onHand: 26 }), false);
+    assert.equal(isInactiveListing({ sku: 'SIC-1001', onHand: 26 }, catalogue), false);
   });
 
   test('does not fire for a SKU that is not in the catalogue', () => {
-    assert.equal(isInactiveListing({ sku: 'SIC-9999', onHand: 5 }), false);
+    assert.equal(isInactiveListing({ sku: 'SIC-9999', onHand: 5 }, catalogue), false);
   });
 });
 
 describe('slow-moving stock', () => {
   test('fires for an active product at or under the threshold that still holds stock', () => {
     // SIC-2002 sold 3 in 90 days.
-    assert.equal(isSlowMoving({ sku: 'SIC-2002', onHand: 62 }), true);
+    assert.equal(isSlowMoving({ sku: 'SIC-2002', onHand: 62 }, catalogue), true);
   });
 
   test('does not fire for a fast seller', () => {
     // SIC-3001 sold 388 in 90 days.
-    assert.equal(isSlowMoving({ sku: 'SIC-3001', onHand: 260 }), false);
+    assert.equal(isSlowMoving({ sku: 'SIC-3001', onHand: 260 }, catalogue), false);
   });
 
   test('does not fire when no stock is held - there is nothing to shift', () => {
-    assert.equal(isSlowMoving({ sku: 'SIC-2002', onHand: 0 }), false);
+    assert.equal(isSlowMoving({ sku: 'SIC-2002', onHand: 0 }, catalogue), false);
   });
 
   test('does not fire for a withdrawn listing - that is reported as inactive instead', () => {
     // SIC-4003 sold 1 in 90 days but is inactive.
-    assert.equal(isSlowMoving({ sku: 'SIC-4003', onHand: 9 }), false);
+    assert.equal(isSlowMoving({ sku: 'SIC-4003', onHand: 9 }, catalogue), false);
   });
 
   test('the threshold is inclusive', () => {
@@ -203,7 +213,7 @@ describe('slow-moving stock', () => {
       (p) => p.active && p.unitsSoldLast90Days <= SLOW_MOVING_THRESHOLD,
     );
     assert.ok(atThreshold, 'the dummy catalogue has no slow-moving product to test');
-    assert.equal(isSlowMoving({ sku: atThreshold.sku, onHand: 1 }), true);
+    assert.equal(isSlowMoving({ sku: atThreshold.sku, onHand: 1 }, catalogue), true);
   });
 });
 
@@ -219,11 +229,11 @@ describe('describeStockLine', () => {
 
 describe('detectIssues', () => {
   test('returns nothing for a clean line', () => {
-    assert.deepEqual(detectIssues([line()]), []);
+    assert.deepEqual(detectIssues([line()], catalogue), []);
   });
 
   test('names the SKU and the warehouse on every issue', () => {
-    for (const issue of detectIssues(STOCK_LINES)) {
+    for (const issue of detectIssues(STOCK_LINES, catalogue)) {
       assert.ok(issue.sku, 'issue has no SKU');
       assert.ok(issue.warehouseId, 'issue has no warehouse');
       assert.ok(issue.detail, 'issue has no explanation');
@@ -231,35 +241,36 @@ describe('detectIssues', () => {
   });
 
   test('only ever raises one of the six declared types', () => {
-    for (const issue of detectIssues(STOCK_LINES)) {
+    for (const issue of detectIssues(STOCK_LINES, catalogue)) {
       assert.ok(ISSUE_TYPES.includes(issue.type), `unexpected issue type ${issue.type}`);
     }
   });
 
   test('the dummy data demonstrates all six issue types', () => {
-    const found = new Set(detectIssues(STOCK_LINES).map((issue) => issue.type));
+    const found = new Set(detectIssues(STOCK_LINES, catalogue).map((issue) => issue.type));
     for (const type of ISSUE_TYPES) {
       assert.ok(found.has(type), `the dummy data raises no ${type}`);
     }
   });
 
   test('does not report a negative line as out of stock as well', () => {
-    const issues = detectIssues([line({ onHand: -6, reserved: 0, minimum: 40 })]);
+    const issues = detectIssues([line({ onHand: -6, reserved: 0, minimum: 40 })], catalogue);
     const types = issues.map((issue) => issue.type);
     assert.deepEqual(types, ['Negative Inventory']);
   });
 
   test('reports a single line under more than one heading when both apply', () => {
     // Held at an unapproved site and below its minimum.
-    const issues = detectIssues([
-      { sku: 'SIC-1001', warehouseId: 'WH-LDS', onHand: 4, reserved: 0, minimum: 10 },
-    ]);
+    const issues = detectIssues(
+      [{ sku: 'SIC-1001', warehouseId: 'WH-LDS', onHand: 4, reserved: 0, minimum: 10 }],
+      catalogue,
+    );
     const types = issues.map((issue) => issue.type).sort();
     assert.deepEqual(types, ['Low Stock', 'Warehouse/SKU Mismatch']);
   });
 
   test('explains an over-reserved line as over-reservation, not an empty shelf', () => {
-    const [issue] = detectIssues([line({ onHand: 12, reserved: 18, minimum: 10 })]);
+    const [issue] = detectIssues([line({ onHand: 12, reserved: 18, minimum: 10 })], catalogue);
     assert.equal(issue.type, 'Out of Stock');
     assert.match(issue.detail, /Over-reserved/);
   });

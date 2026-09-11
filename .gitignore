@@ -33,6 +33,10 @@ $RECYCLE.BIN/
 *.temp
 *.bak
 
+# Node dependencies - restored with `npm install`, never committed.
+# package-lock.json is deliberately NOT ignored: it pins the versions.
+node_modules/
+
 # Logs
 *.log
 logs/
@@ -46,6 +50,10 @@ logs/
 .env
 .env.*
 !.env.example
+# NOTE: inventory/test.env is deliberately NOT ignored and must stay committed.
+# It holds no credentials - only DB_SCHEMA=inventory_control_test - and it is
+# what keeps the test suite off the production schema. Do not add a blanket
+# *.env rule here.
 *.pem
 *.key
 *.pfx

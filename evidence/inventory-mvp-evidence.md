@@ -21,7 +21,7 @@ illustrative or reconstructed, and no screenshots are claimed.
 
 ## 2. Independent recomputation from the raw data files
 
-Recalculated directly from `inventory/data/*.js` without importing `rules.js` or
+Recalculated directly from `inventory/fixture/*.js` without importing `rules.js` or
 `reports.js`:
 
 ```

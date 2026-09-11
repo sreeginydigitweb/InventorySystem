@@ -149,6 +149,60 @@ other existing test was changed, skipped or removed.
 edit and delete where those make sense, the derived figures stay derived, and
 the detection rules are unchanged.
 
+## Third round - PostgreSQL persistence (2026-09-10)
+
+The in-memory session store was replaced with PostgreSQL. Data now lives in
+`varmen_db`, in a schema of its own called `inventory_control`.
+
+### What was created, and what was not touched
+
+Seven tables in one new schema: `products`, `warehouses`, `product_warehouses`,
+`stock_lines`, `transfers`, `audit_counts`, `alert_actions`. Created by
+`sql/001-inventory-control-schema.sql`, which contains only `CREATE` statements.
+
+The schema was confirmed absent before creation, and no proposed table name
+collided with an existing one. The six schemas already in `varmen_db` -
+`competitor_analysis` (3 tables), `cst_app` (22), `issue_tracking` (17 + 1 view),
+`poc_listing` (13 + 2 views), `review` (2), `welfare` (1) - were counted before
+and after and are unchanged. Nothing in the application names any schema but
+`inventory_control`: every statement in `store.js` and `fixture/load.js` is qualified
+with it, and a repository-wide search finds no other schema referenced outside a
+comment.
+
+### Two deliberate schema decisions
+
+1. **No column exists for `available` or `difference`.** Both stay derived, so a
+   stored figure cannot disagree with the figures it comes from.
+2. **`stock_lines` carries no foreign keys.** Three of the conditions the
+   Warehouse/SKU Mismatch rule detects *are* broken references. A foreign key
+   would make them impossible to record - removing the system's ability to
+   report the problem rather than fixing it. Every other table where a broken
+   reference is not a detectable condition does use real foreign keys.
+
+### Known limitations of this round
+
+- The whole test suite runs against the live database, so a run both depends on
+  and rewrites `inventory_control`. It reseeds before each case and leaves the
+  schema at the seeded dataset, but it is not safe to run two suites at once.
+- **The suite must run one file at a time.** `node --test` runs test *files* in
+  parallel by default, and every file that touches data reseeds before each
+  case - so in parallel they pull the data out from under each other. Found the
+  hard way: each file passed alone and twenty cases failed together. The npm
+  script now passes `--test-concurrency=1`. Running `node --test` directly,
+  without that flag, will produce spurious failures.
+- Round-trip latency to the database is roughly 200ms, and the suite is now
+  serial, so a full run takes minutes rather than seconds.
+- **Transfer and audit identifiers are allocated by reading the highest in use**
+  (`TR-1009`, `AC-1011`) rather than from a sequence. Two people adding a
+  transfer at the same instant could be handed the same id, and the second
+  insert would fail on the primary key rather than corrupt anything. A sequence
+  or an identity column would remove the race; it has not been done because the
+  ids are part of what the screens show and the MVP has one user at a time.
+- The application connects as `varmen_user`, which **owns** the database and can
+  therefore drop it. A role scoped to `inventory_control` - or a read-only role
+  for the reporting screens and a separate writer - would be the right shape
+  before this is used by more than one person.
+
 ## Known limitations at the point of validation
 
 These are recorded boundaries, not defects. They are listed in full in

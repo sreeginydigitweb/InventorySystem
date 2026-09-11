@@ -12,13 +12,15 @@
  * need no client-side JavaScript at all.
  */
 
-import { WAREHOUSES, warehouseName } from './data/warehouses.js';
-import { CATEGORIES, PRODUCTS, SUPPLIERS, findProduct } from './data/products.js';
-import { TRANSFER_STATUSES } from './data/transfers.js';
 import { ISSUE_TYPES, STOCK_STATUS } from './rules.js';
 import {
   ACTION_STATUSES,
+  CATEGORIES,
   LISTING_STATUSES,
+  SUPPLIERS,
+  TRANSFER_STATUSES,
+  allProducts,
+  allWarehouses,
   addAuditCount,
   addProduct,
   addStockLine,
@@ -28,8 +30,10 @@ import {
   deleteStockLine,
   deleteTransfer,
   findAuditCount,
+  findProduct,
   findStockLine,
   findTransfer,
+  findWarehouse,
   recordIssueAction,
   referencesTo,
   systemQuantityFor,
@@ -45,6 +49,7 @@ import {
   issueCounts,
   issuesReport,
   productsReport,
+  snapshot,
   stockReport,
   transferCounts,
   transfersReport,
@@ -77,7 +82,7 @@ import {
 } from './render.js';
 
 /** Every warehouse identifier, for validating a warehouse filter. */
-const warehouseIds = () => WAREHOUSES.map((warehouse) => warehouse.id);
+const idsOf = (warehouses) => warehouses.map((warehouse) => warehouse.id);
 
 /** The health bands offered in the stock filter, in severity order. */
 const STOCK_STATUS_FILTERS = Object.freeze([
@@ -202,18 +207,22 @@ function doneAt(path, code, subject) {
 /* Screens                                                                    */
 /* -------------------------------------------------------------------------- */
 
-function dashboardRoute() {
+async function dashboardRoute() {
+  // One snapshot, three reports built from it, so the dashboard is one read.
+  const data = await snapshot();
+
   return html(
     renderDashboardPage({
-      metrics: dashboardMetrics(),
-      issueCounts: issueCounts(),
-      transferCounts: transferCounts(),
+      metrics: await dashboardMetrics(data),
+      issueCounts: await issueCounts(data),
+      transferCounts: await transferCounts(data),
     }),
   );
 }
 
-function productsRoute(query) {
-  const all = productsReport();
+async function productsRoute(query) {
+  const data = await snapshot();
+  const all = await productsReport(data);
   const search = param(query, 'q');
   const category = allowedValue(param(query, 'category'), CATEGORIES);
   const supplier = allowedValue(param(query, 'supplier'), SUPPLIERS);
@@ -234,16 +243,17 @@ function productsRoute(query) {
       search,
       category,
       supplier,
-      unknownSkus: unknownSkus(),
+      unknownSkus: await unknownSkus(data),
       flash: flashFrom(query),
     }),
   );
 }
 
-function stockRoute(query) {
-  const all = stockReport();
+async function stockRoute(query) {
+  const data = await snapshot();
+  const all = await stockReport(data);
   const search = param(query, 'q');
-  const warehouseId = allowedValue(param(query, 'warehouse'), warehouseIds());
+  const warehouseId = allowedValue(param(query, 'warehouse'), idsOf(data.warehouses));
   const status = allowedValue(param(query, 'status'), STOCK_STATUS_FILTERS);
 
   const lines = all.filter(
@@ -257,7 +267,7 @@ function stockRoute(query) {
     renderStockPage({
       lines,
       total: all.length,
-      warehouses: WAREHOUSES,
+      warehouses: data.warehouses,
       statuses: STOCK_STATUS_FILTERS,
       warehouseId,
       status,
@@ -267,10 +277,11 @@ function stockRoute(query) {
   );
 }
 
-function alertsRoute(query) {
-  const all = issuesReport();
+async function alertsRoute(query) {
+  const data = await snapshot();
+  const all = await issuesReport(data);
   const type = allowedValue(param(query, 'type'), ISSUE_TYPES);
-  const warehouseId = allowedValue(param(query, 'warehouse'), warehouseIds());
+  const warehouseId = allowedValue(param(query, 'warehouse'), idsOf(data.warehouses));
   const actionStatus = allowedValue(param(query, 'action'), ACTION_STATUSES);
 
   const issues = all.filter(
@@ -285,7 +296,7 @@ function alertsRoute(query) {
       issues,
       total: all.length,
       issueTypes: ISSUE_TYPES,
-      warehouses: WAREHOUSES,
+      warehouses: data.warehouses,
       actionStatuses: ACTION_STATUSES,
       type,
       warehouseId,
@@ -295,14 +306,15 @@ function alertsRoute(query) {
   );
 }
 
-function transfersRoute(query) {
-  const all = transfersReport();
+async function transfersRoute(query) {
+  const data = await snapshot();
+  const all = await transfersReport(data);
   const status = allowedValue(param(query, 'status'), TRANSFER_STATUSES);
   // Source and destination are filtered separately, so staff can ask what is
   // leaving one site, what is arriving at another, or a specific move between
   // the two. Set both and they narrow together like any other pair of filters.
-  const fromWarehouseId = allowedValue(param(query, 'from'), warehouseIds());
-  const toWarehouseId = allowedValue(param(query, 'to'), warehouseIds());
+  const fromWarehouseId = allowedValue(param(query, 'from'), idsOf(data.warehouses));
+  const toWarehouseId = allowedValue(param(query, 'to'), idsOf(data.warehouses));
 
   const transfers = all.filter(
     (transfer) =>
@@ -316,7 +328,7 @@ function transfersRoute(query) {
       transfers,
       total: all.length,
       statuses: TRANSFER_STATUSES,
-      warehouses: WAREHOUSES,
+      warehouses: data.warehouses,
       status,
       fromWarehouseId,
       toWarehouseId,
@@ -325,9 +337,10 @@ function transfersRoute(query) {
   );
 }
 
-function auditRoute(query) {
-  const all = auditReport();
-  const warehouseId = allowedValue(param(query, 'warehouse'), warehouseIds());
+async function auditRoute(query) {
+  const data = await snapshot();
+  const all = await auditReport(data);
+  const warehouseId = allowedValue(param(query, 'warehouse'), idsOf(data.warehouses));
   // Discrepancies-only is a plain on/off switch rather than a choice of values.
   const differencesOnly = param(query, 'difference') !== '';
 
@@ -339,7 +352,7 @@ function auditRoute(query) {
     renderAuditPage({
       rows,
       total: all.length,
-      warehouses: WAREHOUSES,
+      warehouses: data.warehouses,
       warehouseId,
       differencesOnly,
       flash: flashFrom(query),
@@ -391,11 +404,11 @@ function field(form, name) {
   return String(form.get(name) ?? '').trim();
 }
 
-/** The lists every record form offers. */
-const formLists = () => ({
-  products: PRODUCTS,
-  warehouses: WAREHOUSES,
-});
+/** The lists every record form offers, read together. */
+async function formLists() {
+  const [products, warehouses] = await Promise.all([allProducts(), allWarehouses()]);
+  return { products, warehouses };
+}
 
 /* --- Products ------------------------------------------------------------- */
 
@@ -413,28 +426,38 @@ function productToForm(product) {
 }
 
 /** Everything renderProductFormPage needs besides the values. */
-const productFormOptions = () => ({
-  categories: CATEGORIES,
-  suppliers: SUPPLIERS,
-  warehouses: WAREHOUSES,
-  listingStatuses: LISTING_STATUSES,
-});
+async function productFormOptions() {
+  return {
+    categories: CATEGORIES,
+    suppliers: SUPPLIERS,
+    warehouses: await allWarehouses(),
+    listingStatuses: LISTING_STATUSES,
+  };
+}
 
-function productViewRoute(query) {
+async function productViewRoute(query) {
   const sku = param(query, 'sku');
-  const product = productsReport().find((row) => row.sku === sku);
+  const data = await snapshot();
+  const product = (await productsReport(data)).find((row) => row.sku === sku);
   if (!product) return notFound();
 
   return html(
     renderProductViewPage({
-      product: { ...product, approvedWarehouseNames: product.approvedWarehouses.map(warehouseName) },
-      stockLines: stockReport().filter((line) => line.sku === sku),
+      product: {
+        ...product,
+        approvedWarehouseNames: product.approvedWarehouses.map(
+          (id) => data.catalogue.findWarehouse(id)?.name ?? id,
+        ),
+      },
+      stockLines: (await stockReport(data)).filter((line) => line.sku === sku),
       flash: flashFrom(query),
     }),
   );
 }
 
-function productAddRoute() {
+async function productAddRoute() {
+  const options = await productFormOptions();
+
   return html(
     renderProductFormPage({
       mode: 'add',
@@ -443,41 +466,41 @@ function productAddRoute() {
       values: {
         listing: 'Active',
         unitsSoldLast90Days: '0',
-        approvedWarehouses: WAREHOUSES.map((warehouse) => warehouse.id),
+        approvedWarehouses: options.warehouses.map((warehouse) => warehouse.id),
       },
-      ...productFormOptions(),
+      ...options,
     }),
   );
 }
 
-function productEditRoute(query) {
-  const product = findProduct(param(query, 'sku'));
+async function productEditRoute(query) {
+  const product = await findProduct(param(query, 'sku'));
   if (!product) return notFound();
 
   return html(
-    renderProductFormPage({ mode: 'edit', values: productToForm(product), ...productFormOptions() }),
+    renderProductFormPage({ mode: 'edit', values: productToForm(product), ...(await productFormOptions()) }),
   );
 }
 
-function productDeleteRoute(query) {
-  const product = findProduct(param(query, 'sku'));
+async function productDeleteRoute(query) {
+  const product = await findProduct(param(query, 'sku'));
   if (!product) return notFound();
 
   return html(
     renderProductDeletePage({
       product,
-      references: referencesTo(product.sku),
+      references: await referencesTo(product.sku),
       flash: flashFrom(query),
     }),
   );
 }
 
-function productAddPost(form) {
+async function productAddPost(form) {
   const values = formValues(form);
-  const result = addProduct(values);
+  const result = await addProduct(values);
   if (!result.ok) {
     return html(
-      renderProductFormPage({ mode: 'add', values, errors: result.errors, ...productFormOptions() }),
+      renderProductFormPage({ mode: 'add', values, errors: result.errors, ...(await productFormOptions()) }),
       400,
     );
   }
@@ -485,14 +508,14 @@ function productAddPost(form) {
   return redirect(doneAt('/products', 'product-added', result.value.sku));
 }
 
-function productEditPost(form) {
+async function productEditPost(form) {
   const sku = field(form, 'sku');
   const values = { ...formValues(form), sku };
-  const result = updateProduct(sku, values);
+  const result = await updateProduct(sku, values);
   if (!result.ok) {
-    if (!findProduct(sku)) return notFound();
+    if (!(await findProduct(sku))) return notFound();
     return html(
-      renderProductFormPage({ mode: 'edit', values, errors: result.errors, ...productFormOptions() }),
+      renderProductFormPage({ mode: 'edit', values, errors: result.errors, ...(await productFormOptions()) }),
       400,
     );
   }
@@ -500,13 +523,13 @@ function productEditPost(form) {
   return redirect(doneAt('/products', 'product-updated', result.value.sku));
 }
 
-function productDeletePost(form) {
+async function productDeletePost(form) {
   const sku = field(form, 'sku');
-  const product = findProduct(sku);
+  const product = await findProduct(sku);
   if (!product) return notFound();
 
-  const references = referencesTo(sku);
-  const result = deleteProduct(sku, { cascade: form.get('cascade') !== null });
+  const references = await referencesTo(sku);
+  const result = await deleteProduct(sku, { cascade: form.get('cascade') !== null });
 
   if (!result.ok) {
     return html(
@@ -527,27 +550,27 @@ function productDeletePost(form) {
 /* --- Warehouse stock ------------------------------------------------------ */
 
 /** A stored stock line as the form fields see it. */
-function stockToForm(line) {
+function stockToForm(line, warehouseName) {
   return {
     sku: line.sku,
     warehouseId: line.warehouseId,
-    warehouseName: warehouseName(line.warehouseId),
+    warehouseName,
     onHand: String(line.onHand),
     reserved: String(line.reserved),
     minimum: String(line.minimum),
   };
 }
 
-function stockViewRoute(query) {
+async function stockViewRoute(query) {
   const sku = param(query, 'sku');
   const warehouseId = param(query, 'warehouse');
-  const line = stockReport().find((row) => row.sku === sku && row.warehouseId === warehouseId);
+  const line = (await stockReport()).find((row) => row.sku === sku && row.warehouseId === warehouseId);
   if (!line) return notFound();
 
   return html(
     renderStockViewPage({
       line,
-      issues: issuesReport().filter(
+      issues: (await issuesReport()).filter(
         (issue) => issue.sku === sku && issue.warehouseId === warehouseId,
       ),
       flash: flashFrom(query),
@@ -555,7 +578,7 @@ function stockViewRoute(query) {
   );
 }
 
-function stockAddRoute(query) {
+async function stockAddRoute(query) {
   return html(
     renderStockFormPage({
       mode: 'add',
@@ -566,51 +589,62 @@ function stockAddRoute(query) {
         reserved: '0',
         minimum: '0',
       },
-      ...formLists(),
+      ...(await formLists()),
     }),
   );
 }
 
-function stockEditRoute(query) {
-  const line = findStockLine(param(query, 'sku'), param(query, 'warehouse'));
+async function stockEditRoute(query) {
+  const line = await findStockLine(param(query, 'sku'), param(query, 'warehouse'));
   if (!line) return notFound();
 
-  return html(renderStockFormPage({ mode: 'edit', values: stockToForm(line), ...formLists() }));
+  const warehouse = await findWarehouse(line.warehouseId);
+
+  return html(
+    renderStockFormPage({
+      mode: 'edit',
+      values: stockToForm(line, warehouse?.name ?? line.warehouseId),
+      ...(await formLists()),
+    }),
+  );
 }
 
-function stockDeleteRoute(query) {
+async function stockDeleteRoute(query) {
   const sku = param(query, 'sku');
   const warehouseId = param(query, 'warehouse');
-  const line = stockReport().find((row) => row.sku === sku && row.warehouseId === warehouseId);
+  const line = (await stockReport()).find((row) => row.sku === sku && row.warehouseId === warehouseId);
   if (!line) return notFound();
 
   return html(renderStockDeletePage({ line, flash: flashFrom(query) }));
 }
 
-function stockAddPost(form) {
+async function stockAddPost(form) {
   const values = formValues(form);
-  const result = addStockLine(values);
+  const result = await addStockLine(values);
   if (!result.ok) {
-    return html(renderStockFormPage({ mode: 'add', values, errors: result.errors, ...formLists() }), 400);
+    return html(renderStockFormPage({ mode: 'add', values, errors: result.errors, ...(await formLists()) }), 400);
   }
 
   return redirect(doneAt('/stock', 'stock-added', result.value.sku));
 }
 
-function stockEditPost(form) {
+async function stockEditPost(form) {
   const originalSku = field(form, 'originalSku');
   const originalWarehouse = field(form, 'originalWarehouse');
-  if (!findStockLine(originalSku, originalWarehouse)) return notFound();
+  if (!(await findStockLine(originalSku, originalWarehouse))) return notFound();
 
   const values = { ...formValues(form), originalSku, originalWarehouse };
-  const result = updateStockLine(originalSku, originalWarehouse, values);
+  const result = await updateStockLine(originalSku, originalWarehouse, values);
   if (!result.ok) {
     return html(
       renderStockFormPage({
         mode: 'edit',
-        values: { ...values, warehouseName: warehouseName(values.warehouseId) },
+        values: {
+          ...values,
+          warehouseName: (await findWarehouse(values.warehouseId))?.name ?? values.warehouseId,
+        },
         errors: result.errors,
-        ...formLists(),
+        ...(await formLists()),
       }),
       400,
     );
@@ -619,10 +653,10 @@ function stockEditPost(form) {
   return redirect(doneAt('/stock', 'stock-updated', result.value.sku));
 }
 
-function stockDeletePost(form) {
+async function stockDeletePost(form) {
   const sku = field(form, 'sku');
   const warehouseId = field(form, 'warehouse');
-  const result = deleteStockLine(sku, warehouseId);
+  const result = await deleteStockLine(sku, warehouseId);
   if (!result.ok) return notFound();
 
   return redirect(doneAt('/stock', 'stock-deleted', sku));
@@ -640,33 +674,33 @@ function stockDeletePost(form) {
  * @param {URLSearchParams} query
  * @returns {object|null}
  */
-function issueFromQuery(query) {
+async function issueFromQuery(query) {
   const type = param(query, 'type');
   const sku = param(query, 'sku');
   const warehouseId = param(query, 'warehouse');
 
   return (
-    issuesReport().find(
+    (await issuesReport()).find(
       (issue) => issue.type === type && issue.sku === sku && issue.warehouseId === warehouseId,
     ) ?? null
   );
 }
 
-function issueViewRoute(query) {
-  const issue = issueFromQuery(query);
+async function issueViewRoute(query) {
+  const issue = await issueFromQuery(query);
   if (!issue) return notFound();
 
   return html(
     renderIssueViewPage({
       issue,
-      line: findStockLine(issue.sku, issue.warehouseId),
+      line: await findStockLine(issue.sku, issue.warehouseId),
       flash: flashFrom(query),
     }),
   );
 }
 
-function issueEditRoute(query) {
-  const issue = issueFromQuery(query);
+async function issueEditRoute(query) {
+  const issue = await issueFromQuery(query);
   if (!issue) return notFound();
 
   return html(
@@ -678,17 +712,17 @@ function issueEditRoute(query) {
   );
 }
 
-function issueEditPost(form) {
+async function issueEditPost(form) {
   const query = new URLSearchParams({
     type: field(form, 'type'),
     sku: field(form, 'sku'),
     warehouse: field(form, 'warehouse'),
   });
-  const issue = issueFromQuery(query);
+  const issue = await issueFromQuery(query);
   if (!issue) return notFound();
 
   const values = formValues(form);
-  const result = recordIssueAction(
+  const result = await recordIssueAction(
     { type: issue.type, sku: issue.sku, warehouseId: issue.warehouseId },
     values,
   );
@@ -716,16 +750,16 @@ function issueEditPost(form) {
  * actually been fixed is detected again and listed again - carrying the
  * Resolved label, rather than being hidden by it.
  */
-function issueResolvePost(form) {
+async function issueResolvePost(form) {
   const query = new URLSearchParams({
     type: field(form, 'type'),
     sku: field(form, 'sku'),
     warehouse: field(form, 'warehouse'),
   });
-  const issue = issueFromQuery(query);
+  const issue = await issueFromQuery(query);
   if (!issue) return notFound();
 
-  const result = recordIssueAction(
+  const result = await recordIssueAction(
     { type: issue.type, sku: issue.sku, warehouseId: issue.warehouseId },
     { status: 'Resolved', note: issue.action.note },
   );
@@ -749,26 +783,26 @@ function transferToForm(transfer) {
   };
 }
 
-function transferViewRoute(query) {
-  const transfer = transfersReport().find((row) => row.id === param(query, 'id'));
+async function transferViewRoute(query) {
+  const transfer = (await transfersReport()).find((row) => row.id === param(query, 'id'));
   if (!transfer) return notFound();
 
   return html(renderTransferViewPage({ transfer, flash: flashFrom(query) }));
 }
 
-function transferAddRoute() {
+async function transferAddRoute() {
   return html(
     renderTransferFormPage({
       mode: 'add',
       values: { status: TRANSFER_STATUSES[0], quantity: '1', raisedOn: today() },
       statuses: TRANSFER_STATUSES,
-      ...formLists(),
+      ...(await formLists()),
     }),
   );
 }
 
-function transferEditRoute(query) {
-  const transfer = findTransfer(param(query, 'id'));
+async function transferEditRoute(query) {
+  const transfer = await findTransfer(param(query, 'id'));
   if (!transfer) return notFound();
 
   return html(
@@ -776,21 +810,21 @@ function transferEditRoute(query) {
       mode: 'edit',
       values: transferToForm(transfer),
       statuses: TRANSFER_STATUSES,
-      ...formLists(),
+      ...(await formLists()),
     }),
   );
 }
 
-function transferDeleteRoute(query) {
-  const transfer = transfersReport().find((row) => row.id === param(query, 'id'));
+async function transferDeleteRoute(query) {
+  const transfer = (await transfersReport()).find((row) => row.id === param(query, 'id'));
   if (!transfer) return notFound();
 
   return html(renderTransferDeletePage({ transfer, flash: flashFrom(query) }));
 }
 
-function transferAddPost(form) {
+async function transferAddPost(form) {
   const values = formValues(form);
-  const result = addTransfer(values);
+  const result = await addTransfer(values);
   if (!result.ok) {
     return html(
       renderTransferFormPage({
@@ -798,7 +832,7 @@ function transferAddPost(form) {
         values,
         errors: result.errors,
         statuses: TRANSFER_STATUSES,
-        ...formLists(),
+        ...(await formLists()),
       }),
       400,
     );
@@ -807,12 +841,12 @@ function transferAddPost(form) {
   return redirect(doneAt('/transfers', 'transfer-added', result.value.id));
 }
 
-function transferEditPost(form) {
+async function transferEditPost(form) {
   const id = field(form, 'id');
-  if (!findTransfer(id)) return notFound();
+  if (!(await findTransfer(id))) return notFound();
 
   const values = { ...formValues(form), id };
-  const result = updateTransfer(id, values);
+  const result = await updateTransfer(id, values);
   if (!result.ok) {
     return html(
       renderTransferFormPage({
@@ -820,7 +854,7 @@ function transferEditPost(form) {
         values,
         errors: result.errors,
         statuses: TRANSFER_STATUSES,
-        ...formLists(),
+        ...(await formLists()),
       }),
       400,
     );
@@ -829,9 +863,9 @@ function transferEditPost(form) {
   return redirect(doneAt('/transfers', 'transfer-updated', result.value.id));
 }
 
-function transferDeletePost(form) {
+async function transferDeletePost(form) {
   const id = field(form, 'id');
-  const result = deleteTransfer(id);
+  const result = await deleteTransfer(id);
   if (!result.ok) return notFound();
 
   return redirect(doneAt('/transfers', 'transfer-deleted', id));
@@ -852,19 +886,19 @@ function auditToForm(count) {
   };
 }
 
-function auditViewRoute(query) {
-  const row = auditReport().find((entry) => entry.id === param(query, 'id'));
+async function auditViewRoute(query) {
+  const row = (await auditReport()).find((entry) => entry.id === param(query, 'id'));
   if (!row) return notFound();
 
   return html(renderAuditViewPage({ row, flash: flashFrom(query) }));
 }
 
-function auditAddRoute(query) {
+async function auditAddRoute(query) {
   const sku = param(query, 'sku');
   const warehouseId = param(query, 'warehouse');
   // When the SKU and site are already known, the system figure is filled in
   // from the stock data rather than left for staff to look up by hand.
-  const system = sku && warehouseId ? systemQuantityFor(sku, warehouseId) : null;
+  const system = sku && warehouseId ? await systemQuantityFor(sku, warehouseId) : null;
 
   return html(
     renderAuditFormPage({
@@ -877,51 +911,51 @@ function auditAddRoute(query) {
         countedOn: today(),
         countedBy: '',
       },
-      ...formLists(),
+      ...(await formLists()),
     }),
   );
 }
 
-function auditEditRoute(query) {
-  const count = findAuditCount(param(query, 'id'));
+async function auditEditRoute(query) {
+  const count = await findAuditCount(param(query, 'id'));
   if (!count) return notFound();
 
-  return html(renderAuditFormPage({ mode: 'edit', values: auditToForm(count), ...formLists() }));
+  return html(renderAuditFormPage({ mode: 'edit', values: auditToForm(count), ...(await formLists()) }));
 }
 
-function auditDeleteRoute(query) {
-  const row = auditReport().find((entry) => entry.id === param(query, 'id'));
+async function auditDeleteRoute(query) {
+  const row = (await auditReport()).find((entry) => entry.id === param(query, 'id'));
   if (!row) return notFound();
 
   return html(renderAuditDeletePage({ row, flash: flashFrom(query) }));
 }
 
-function auditAddPost(form) {
+async function auditAddPost(form) {
   const values = formValues(form);
-  const result = addAuditCount(values);
+  const result = await addAuditCount(values);
   if (!result.ok) {
-    return html(renderAuditFormPage({ mode: 'add', values, errors: result.errors, ...formLists() }), 400);
+    return html(renderAuditFormPage({ mode: 'add', values, errors: result.errors, ...(await formLists()) }), 400);
   }
 
   return redirect(doneAt('/audit', 'audit-added', result.value.id));
 }
 
-function auditEditPost(form) {
+async function auditEditPost(form) {
   const id = field(form, 'id');
-  if (!findAuditCount(id)) return notFound();
+  if (!(await findAuditCount(id))) return notFound();
 
   const values = { ...formValues(form), id };
-  const result = updateAuditCount(id, values);
+  const result = await updateAuditCount(id, values);
   if (!result.ok) {
-    return html(renderAuditFormPage({ mode: 'edit', values, errors: result.errors, ...formLists() }), 400);
+    return html(renderAuditFormPage({ mode: 'edit', values, errors: result.errors, ...(await formLists()) }), 400);
   }
 
   return redirect(doneAt('/audit', 'audit-updated', result.value.id));
 }
 
-function auditDeletePost(form) {
+async function auditDeletePost(form) {
   const id = field(form, 'id');
-  const result = deleteAuditCount(id);
+  const result = await deleteAuditCount(id);
   if (!result.ok) return notFound();
 
   return redirect(doneAt('/audit', 'audit-deleted', id));
@@ -937,13 +971,13 @@ function auditDeletePost(form) {
  * @param {string} pathname
  * @returns {object}
  */
-function imageRoute(pathname) {
+async function imageRoute(pathname) {
   const sku = decodeURIComponent(pathname.slice('/images/'.length, -'.svg'.length));
 
   return {
     status: 200,
     contentType: 'image/svg+xml; charset=utf-8',
-    body: renderThumbnailSvg(findProduct(sku)),
+    body: renderThumbnailSvg(await findProduct(sku)),
   };
 }
 
@@ -956,7 +990,7 @@ function imageRoute(pathname) {
  * @param {URLSearchParams} [query]
  * @returns {{status: number, contentType: string, body: string}}
  */
-export function route(pathname, query = new URLSearchParams()) {
+export async function route(pathname, query = new URLSearchParams()) {
   const path = normalisePath(pathname);
 
   if (path.startsWith('/images/') && path.endsWith('.svg')) {
@@ -1053,7 +1087,7 @@ function normalisePath(pathname) {
  * @param {URLSearchParams} [form] The decoded request body.
  * @returns {{status: number, contentType: string, body: string, location?: string}}
  */
-export function routeForm(pathname, form = new URLSearchParams()) {
+export async function routeForm(pathname, form = new URLSearchParams()) {
   switch (normalisePath(pathname)) {
     case '/products/add':
       return productAddPost(form);

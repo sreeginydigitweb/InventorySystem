@@ -39,7 +39,7 @@ Added 2026-09-10, on top of the read-only MVP above.
 | What | Behaviour |
 | --- | --- |
 | **Scope** | Products, Warehouse Stock, Transfers and Inventory Audit have view, add, edit and delete. Alerts has view and an action record. |
-| **Where changes live** | In memory, for the life of the server process. The files in `inventory/data/` are the seed; a restart discards every change. Still no database. |
+| **Where changes live** | In memory, for the life of the server process. The files in `inventory/fixture/` are the seed; a restart discards every change. Still no database. |
 | **How writes happen** | Plain HTML forms posting to the server. A `GET` never changes anything, so a delete link only opens the page that asks. |
 | **After a successful write** | A redirect to the list screen, so refreshing cannot repeat it. |
 | **After a rejected write** | The form again, with the submitted values still in it and the reason named against the field. Nothing partial is ever saved. |
@@ -78,12 +78,16 @@ tick, so a deletion never leaves a record pointing at a SKU that is gone.
 
 Recording these matters as much as recording what is supported.
 
-- **No database.** All data is loaded from files in `inventory/data/` at startup.
+- **PostgreSQL, one schema.** Data lives in `inventory_control` in the
+  configured database, and the application never seeds it. `inventory/fixture/`
+  is test data, loaded only into the separate `inventory_control_test` schema;
+  `load.js` refuses to write it into `inventory_control`. The application never
+  reads or writes any other schema in that database.
 - **No live inventory source, marketplace or warehouse integration, and no API.**
-- **Nothing survives a restart.** Records can be added, edited and deleted, but
-  only in memory. The server answers `GET`, `HEAD` and `POST`; any other
-  method returns 405, and `POST` is accepted only as form-encoded data from the
-  record forms.
+- **Changes persist.** Records added, edited or deleted through the screens are
+  written to PostgreSQL and survive a restart. The server answers `GET`, `HEAD`
+  and `POST`; any other method returns 405, and `POST` is accepted only as
+  form-encoded data from the record forms.
 - **No audit trail of changes.** Who changed a record, and when, is not kept -
   only the action notes staff write against issues carry a timestamp.
 - **No concurrency control.** Two people editing the same record last-write-wins.

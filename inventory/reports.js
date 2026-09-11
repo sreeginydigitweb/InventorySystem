@@ -1,34 +1,93 @@
 /**
  * Reporting: the derived views the screens are built from.
  *
- * Like rules.js this owns no HTML. It turns the dummy dataset plus the
+ * Like rules.js this owns no HTML. It turns what is in the database plus the
  * detection rules into the exact shapes the six screens need, so a screen never
  * has to work anything out for itself.
  *
  * Every figure here is derived on each call. Nothing is cached and nothing is
- * written back to the dataset, so what a screen shows is always what the data
- * says.
+ * written back, so what a screen shows is always what the data says.
+ *
+ * ---------------------------------------------------------------------------
+ * ONE SNAPSHOT PER REQUEST
+ *
+ * The database is remote, so a round trip is not free. Each of these functions
+ * can be handed a snapshot() - one parallel read of the five tables - and a
+ * screen that needs several reports takes one snapshot and passes it to all of
+ * them. Called without one, a function loads its own, so each is still usable
+ * on its own and in a test.
  */
 
-import { STOCK_LINES } from './data/stock.js';
-import { PRODUCTS, findProduct, productName } from './data/products.js';
-import { warehouseName } from './data/warehouses.js';
-import { TRANSFERS, TRANSFER_STATUSES } from './data/transfers.js';
-import { AUDIT_COUNTS } from './data/audit.js';
-import { STOCK_STATUS, describeStockLine, detectIssues } from './rules.js';
-import { issueAction, issueKey } from './store.js';
+import {
+  STOCK_STATUS,
+  describeStockLine,
+  detectIssues,
+  makeCatalogue,
+} from './rules.js';
+import {
+  TRANSFER_STATUSES,
+  allAuditCounts,
+  allIssueActions,
+  allProducts,
+  allStockLines,
+  allTransfers,
+  allWarehouses,
+  defaultIssueAction,
+  issueKey,
+} from './store.js';
+
+/**
+ * Read everything the screens are built from, in parallel.
+ *
+ * Six statements, issued together rather than one after another, so a page
+ * costs roughly one round trip instead of six.
+ *
+ * @returns {Promise<object>}
+ */
+export async function snapshot() {
+  const [products, warehouses, stockLines, transfers, auditCounts, actions] = await Promise.all([
+    allProducts(),
+    allWarehouses(),
+    allStockLines(),
+    allTransfers(),
+    allAuditCounts(),
+    allIssueActions(),
+  ]);
+
+  return {
+    products,
+    warehouses,
+    stockLines,
+    transfers,
+    auditCounts,
+    actions,
+    catalogue: makeCatalogue(products, warehouses),
+  };
+}
+
+/** Use the snapshot given, or take one. */
+const use = async (given) => given ?? (await snapshot());
+
+/** Display name for a SKU, falling back to a clear label. */
+const productName = (data, sku) => data.catalogue.findProduct(sku)?.name ?? 'Unknown SKU';
+
+/** Display name for a warehouse, falling back to the raw id. */
+const warehouseName = (data, id) => data.catalogue.findWarehouse(id)?.name ?? id;
 
 /**
  * Every stock line, with available stock and health band worked out, and with
  * the product and warehouse names attached for display.
  *
- * @returns {object[]}
+ * @param {object} [data]
+ * @returns {Promise<object[]>}
  */
-export function stockReport() {
-  return STOCK_LINES.map((line) => ({
+export async function stockReport(data) {
+  const snap = await use(data);
+
+  return snap.stockLines.map((line) => ({
     ...describeStockLine(line),
-    productName: productName(line.sku),
-    warehouseName: warehouseName(line.warehouseId),
+    productName: productName(snap, line.sku),
+    warehouseName: warehouseName(snap, line.warehouseId),
   }));
 }
 
@@ -43,9 +102,12 @@ export function stockReport() {
  * silence the other, so an issue marked Resolved while the stock is still short
  * is still detected, still listed, and still counted on the dashboard.
  *
- * @returns {object[]}
+ * @param {object} [data]
+ * @returns {Promise<object[]>}
  */
-export function issuesReport() {
+export async function issuesReport(data) {
+  const snap = await use(data);
+
   const severity = {
     'Negative Inventory': 0,
     'Out of Stock': 1,
@@ -55,14 +117,17 @@ export function issuesReport() {
     'Slow-Moving Stock': 5,
   };
 
-  return detectIssues(STOCK_LINES)
-    .map((issue) => ({
-      ...issue,
-      key: issueKey(issue),
-      action: issueAction(issue),
-      productName: productName(issue.sku),
-      warehouseName: warehouseName(issue.warehouseId),
-    }))
+  return detectIssues(snap.stockLines, snap.catalogue)
+    .map((issue) => {
+      const key = issueKey(issue);
+      return {
+        ...issue,
+        key,
+        action: snap.actions.get(key) ?? defaultIssueAction(),
+        productName: productName(snap, issue.sku),
+        warehouseName: warehouseName(snap, issue.warehouseId),
+      };
+    })
     .sort(
       (a, b) =>
         severity[a.type] - severity[b.type] ||
@@ -74,14 +139,17 @@ export function issuesReport() {
 /**
  * Every transfer, with product and warehouse names attached.
  *
- * @returns {object[]}
+ * @param {object} [data]
+ * @returns {Promise<object[]>}
  */
-export function transfersReport() {
-  return TRANSFERS.map((transfer) => ({
+export async function transfersReport(data) {
+  const snap = await use(data);
+
+  return snap.transfers.map((transfer) => ({
     ...transfer,
-    productName: productName(transfer.sku),
-    fromWarehouseName: warehouseName(transfer.fromWarehouseId),
-    toWarehouseName: warehouseName(transfer.toWarehouseId),
+    productName: productName(snap, transfer.sku),
+    fromWarehouseName: warehouseName(snap, transfer.fromWarehouseId),
+    toWarehouseName: warehouseName(snap, transfer.toWarehouseId),
   }));
 }
 
@@ -92,18 +160,23 @@ export function transfersReport() {
  *
  * A positive difference means more was found on the shelf than the system
  * expected; a negative difference means less. Zero means the count agreed.
+ * There is no difference column in the database, so this is the only place the
+ * figure exists and it cannot disagree with the two it comes from.
  *
- * @returns {object[]}
+ * @param {object} [data]
+ * @returns {Promise<object[]>}
  */
-export function auditReport() {
-  return AUDIT_COUNTS.map((count) => {
+export async function auditReport(data) {
+  const snap = await use(data);
+
+  return snap.auditCounts.map((count) => {
     const difference = count.countedQuantity - count.systemQuantity;
     return {
       ...count,
       difference,
       matches: difference === 0,
-      productName: productName(count.sku),
-      warehouseName: warehouseName(count.warehouseId),
+      productName: productName(snap, count.sku),
+      warehouseName: warehouseName(snap, count.warehouseId),
     };
   });
 }
@@ -117,20 +190,23 @@ export function auditReport() {
  * per line, so Healthy + Low + Out + Negative always equals the total number of
  * lines.
  *
- * @returns {object}
+ * @param {object} [data]
+ * @returns {Promise<object>}
  */
-export function dashboardMetrics() {
-  const lines = stockReport();
+export async function dashboardMetrics(data) {
+  const snap = await use(data);
+  const lines = await stockReport(snap);
+  const audit = await auditReport(snap);
   const countBand = (band) => lines.filter((line) => line.status === band).length;
 
   return {
-    totalSkus: PRODUCTS.length,
+    totalSkus: snap.products.length,
     healthyStock: countBand(STOCK_STATUS.HEALTHY),
     lowStock: countBand(STOCK_STATUS.LOW),
     outOfStock: countBand(STOCK_STATUS.OUT),
     negativeInventory: countBand(STOCK_STATUS.NEGATIVE),
-    discrepancies: auditReport().filter((row) => !row.matches).length,
-    pendingTransfers: TRANSFERS.filter((transfer) => transfer.status === 'Pending').length,
+    discrepancies: audit.filter((row) => !row.matches).length,
+    pendingTransfers: snap.transfers.filter((transfer) => transfer.status === 'Pending').length,
     totalStockLines: lines.length,
   };
 }
@@ -139,10 +215,13 @@ export function dashboardMetrics() {
  * How many issues of each type were found, in the declared display order.
  * Used on the dashboard to point staff at the Alerts screen.
  *
- * @returns {{type: string, count: number}[]}
+ * @param {object} [data]
+ * @returns {Promise<{type: string, count: number}[]>}
  */
-export function issueCounts() {
-  const issues = issuesReport();
+export async function issueCounts(data) {
+  const snap = await use(data);
+  const issues = await issuesReport(snap);
+
   const order = [
     'Negative Inventory',
     'Out of Stock',
@@ -161,12 +240,15 @@ export function issueCounts() {
 /**
  * How many transfers sit at each status, in workflow order.
  *
- * @returns {{status: string, count: number}[]}
+ * @param {object} [data]
+ * @returns {Promise<{status: string, count: number}[]>}
  */
-export function transferCounts() {
+export async function transferCounts(data) {
+  const snap = await use(data);
+
   return TRANSFER_STATUSES.map((status) => ({
     status,
-    count: TRANSFERS.filter((transfer) => transfer.status === status).length,
+    count: snap.transfers.filter((transfer) => transfer.status === status).length,
   }));
 }
 
@@ -174,15 +256,17 @@ export function transferCounts() {
  * The product catalogue, with the total units held across every warehouse
  * attached so the Products screen can show whether a listing is holding stock.
  *
- * @returns {object[]}
+ * @param {object} [data]
+ * @returns {Promise<object[]>}
  */
-export function productsReport() {
-  return PRODUCTS.map((product) => ({
+export async function productsReport(data) {
+  const snap = await use(data);
+
+  return snap.products.map((product) => ({
     ...product,
-    unitsHeld: STOCK_LINES.filter((line) => line.sku === product.sku).reduce(
-      (total, line) => total + line.onHand,
-      0,
-    ),
+    unitsHeld: snap.stockLines
+      .filter((line) => line.sku === product.sku)
+      .reduce((total, line) => total + line.onHand, 0),
   }));
 }
 
@@ -192,11 +276,15 @@ export function productsReport() {
  * Surfaced on the Products screen so staff are not left thinking the catalogue
  * is the whole picture when a stock line points at a SKU that is not in it.
  *
- * @returns {string[]}
+ * @param {object} [data]
+ * @returns {Promise<string[]>}
  */
-export function unknownSkus() {
-  const missing = STOCK_LINES.filter((line) => findProduct(line.sku) === null).map(
-    (line) => line.sku,
-  );
+export async function unknownSkus(data) {
+  const snap = await use(data);
+
+  const missing = snap.stockLines
+    .filter((line) => snap.catalogue.findProduct(line.sku) === null)
+    .map((line) => line.sku);
+
   return [...new Set(missing)].sort();
 }

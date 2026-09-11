@@ -43,8 +43,37 @@
  *    it a second time as slow-moving would add noise, not information.
  */
 
-import { findProduct } from './data/products.js';
-import { findWarehouse } from './data/warehouses.js';
+/**
+ * The catalogue a rule is judged against.
+ *
+ * Three of the six rules need to know what a SKU and a warehouse ARE, not just
+ * what the stock line says. That used to be a hidden import of the dummy data;
+ * now the rows come from the database, so it is passed in explicitly. The rules
+ * stay pure functions of what they are handed - which is also why they can be
+ * tested without a database.
+ *
+ * @typedef {{findProduct: (sku: string) => object|null, findWarehouse: (id: string) => object|null}} Catalogue
+ */
+
+/**
+ * Build a catalogue from lists of products and warehouses.
+ *
+ * @param {readonly object[]} products
+ * @param {readonly object[]} warehouses
+ * @returns {Catalogue}
+ */
+export function makeCatalogue(products, warehouses) {
+  const bySku = new Map(products.map((product) => [product.sku, product]));
+  const byId = new Map(warehouses.map((warehouse) => [warehouse.id, warehouse]));
+
+  return {
+    findProduct: (sku) => bySku.get(sku) ?? null,
+    findWarehouse: (id) => byId.get(id) ?? null,
+  };
+}
+
+/** A catalogue that knows nothing, so every reference looks broken. */
+export const EMPTY_CATALOGUE = makeCatalogue([], []);
 
 /**
  * Units sold in the last 90 days at or below which a product counts as
@@ -143,15 +172,16 @@ export function stockStatus(line) {
  *     held at that site
  *
  * @param {{sku: string, warehouseId: string}} line
+ * @param {Catalogue} catalogue
  * @returns {string|null} Why it is a mismatch, or null when the line is fine.
  */
-export function warehouseMismatchReason(line) {
-  const warehouse = findWarehouse(line.warehouseId);
+export function warehouseMismatchReason(line, catalogue) {
+  const warehouse = catalogue.findWarehouse(line.warehouseId);
   if (!warehouse) {
     return `Warehouse ${line.warehouseId} is not a recognised warehouse`;
   }
 
-  const product = findProduct(line.sku);
+  const product = catalogue.findProduct(line.sku);
   if (!product) {
     return `SKU ${line.sku} is not in the product catalogue`;
   }
@@ -170,10 +200,11 @@ export function warehouseMismatchReason(line) {
  * is required.
  *
  * @param {{sku: string, onHand: number}} line
+ * @param {Catalogue} catalogue
  * @returns {boolean}
  */
-export function isInactiveListing(line) {
-  const product = findProduct(line.sku);
+export function isInactiveListing(line, catalogue) {
+  const product = catalogue.findProduct(line.sku);
   return product !== null && product.active === false && line.onHand > 0;
 }
 
@@ -184,10 +215,11 @@ export function isInactiveListing(line) {
  * See choice 2 in the header for why withdrawn listings are excluded.
  *
  * @param {{sku: string, onHand: number}} line
+ * @param {Catalogue} catalogue
  * @returns {boolean}
  */
-export function isSlowMoving(line) {
-  const product = findProduct(line.sku);
+export function isSlowMoving(line, catalogue) {
+  const product = catalogue.findProduct(line.sku);
   return (
     product !== null &&
     product.active === true &&
@@ -219,9 +251,10 @@ export function describeStockLine(line) {
  * exceptions are Low Stock and Out of Stock, which cannot both apply.
  *
  * @param {readonly object[]} lines
+ * @param {Catalogue} catalogue
  * @returns {object[]} Issues, each naming the SKU and warehouse affected.
  */
-export function detectIssues(lines) {
+export function detectIssues(lines, catalogue) {
   const issues = [];
 
   for (const line of lines) {
@@ -259,17 +292,17 @@ export function detectIssues(lines) {
       raise('Low Stock', `${available} available against a minimum of ${line.minimum}`);
     }
 
-    const mismatch = warehouseMismatchReason(line);
+    const mismatch = warehouseMismatchReason(line, catalogue);
     if (mismatch) {
       raise('Warehouse/SKU Mismatch', mismatch);
     }
 
-    if (isInactiveListing(line)) {
+    if (isInactiveListing(line, catalogue)) {
       raise('Inactive Listing', `Listing is inactive but ${line.onHand} units are still held`);
     }
 
-    if (isSlowMoving(line)) {
-      const product = findProduct(line.sku);
+    if (isSlowMoving(line, catalogue)) {
+      const product = catalogue.findProduct(line.sku);
       raise(
         'Slow-Moving Stock',
         `${product.unitsSoldLast90Days} sold in 90 days against ${line.onHand} units held`,

@@ -1,9 +1,10 @@
 /**
  * Tests for the record screens: view, add, edit and delete over the routes.
  *
- * route() and routeForm() are both pure functions of what they are handed, so a
- * whole workflow - open the form, post it, look at the list afterwards - runs
- * here without a socket.
+ * route() and routeForm() take a path and a form and answer with a response, so
+ * a whole workflow - open the form, post it, look at the list afterwards - runs
+ * here without a socket. They read and write the database, which is why each
+ * case reseeds first.
  *
  * These check three things the unit tests cannot:
  *
@@ -13,35 +14,50 @@
  *   the figures on the dashboard and the alerts screen follow the data, rather
  *     than being counted once and cached
  *
+ * These share one database, so the suite runs one test file at a time
+ * (--test-concurrency=1 in the npm script). Run in parallel, each file's reseed
+ * would pull the data out from under the others.
+ *
  * Run with: npm test
  */
 
-import { test, describe, beforeEach } from 'node:test';
+import { test, describe, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { route, routeForm } from './router.js';
 import { dashboardMetrics, issuesReport } from './reports.js';
 import { ISSUE_TYPES } from './rules.js';
-import { findAuditCount, findStockLine, findTransfer, issueAction, resetStore } from './store.js';
-import { findProduct } from './data/products.js';
+import {
+  findAuditCount,
+  findProduct,
+  findStockLine,
+  findTransfer,
+  issueAction,
+} from './store.js';
+import { closePool } from './db.js';
+import { resetToFixture } from './fixture/load.js';
 
-beforeEach(() => {
-  resetStore();
-});
+/*
+ * Every case starts from the seeded dataset in the database, restored in one
+ * statement, so no case can be made to pass by something an earlier one left
+ * behind - and the whole run leaves inventory_control back at the seed.
+ */
+beforeEach(resetToFixture);
+after(closePool);
 
 /** GET a screen. */
-function get(path) {
+async function get(path) {
   const url = new URL(path, 'http://localhost');
-  return route(url.pathname, url.searchParams);
+  return await route(url.pathname, url.searchParams);
 }
 
 /** POST a form. */
-function post(path, fields) {
+async function post(path, fields) {
   const form = new URLSearchParams();
   for (const [name, value] of Object.entries(fields)) {
     for (const entry of Array.isArray(value) ? value : [value]) form.append(name, entry);
   }
-  return routeForm(path, form);
+  return await routeForm(path, form);
 }
 
 /** The path a successful write redirected to, with the flash stripped off. */
@@ -65,26 +81,26 @@ const productForm = (overrides = {}) => ({
 
 describe('the existing screens still work', () => {
   for (const path of ['/', '/products', '/stock', '/alerts', '/transfers', '/audit']) {
-    test(`${path} still returns a page`, () => {
-      const response = get(path);
+    test(`${path} still returns a page`, async () => {
+      const response = await get(path);
       assert.equal(response.status, 200);
       assert.match(response.body, /^<!doctype html>/);
     });
   }
 
-  test('the existing filters still work', () => {
-    assert.equal(get('/stock?status=Low+Stock').status, 200);
-    assert.equal(get('/products?category=Bulbs').status, 200);
-    assert.equal(get('/audit?difference=only').status, 200);
-    assert.equal(get('/transfers?status=Pending').status, 200);
+  test('the existing filters still work', async () => {
+    assert.equal((await get('/stock?status=Low+Stock')).status, 200);
+    assert.equal((await get('/products?category=Bulbs')).status, 200);
+    assert.equal((await get('/audit?difference=only')).status, 200);
+    assert.equal((await get('/transfers?status=Pending')).status, 200);
   });
 
-  test('the pages carry one same-origin script and no inline handler', () => {
+  test('the pages carry one same-origin script and no inline handler', async () => {
     // The filter bar needs a script to apply itself without an Apply button.
     // That is the whole of the client-side code: one file, from this origin,
     // asserted here so a second script or an inline handler cannot creep in.
     for (const path of ['/products', '/products/add', '/stock/edit?sku=SIC-1001&warehouse=WH-BIR']) {
-      const { body } = get(path);
+      const { body } = await get(path);
       const tags = body.match(/<script[^>]*>/g) ?? [];
 
       assert.deepEqual(tags, ['<script src="/filters.js" defer>'], `${path} scripts`);
@@ -94,18 +110,18 @@ describe('the existing screens still work', () => {
     }
   });
 
-  test('the responsive shell is still on every new screen', () => {
+  test('the responsive shell is still on every new screen', async () => {
     for (const path of ['/products/add', '/stock/view?sku=SIC-1001&warehouse=WH-BIR', '/audit/edit?id=AC-1001']) {
-      const { body } = get(path);
+      const { body } = await get(path);
       assert.match(body, /<meta name="viewport" content="width=device-width, initial-scale=1">/);
       assert.match(body, /@media \(max-width: 767px\)/);
       assert.match(body, /@media \(max-width: 1023px\)/);
     }
   });
 
-  test('every table on a record screen is inside a scroll container', () => {
+  test('every table on a record screen is inside a scroll container', async () => {
     for (const path of ['/products/view?sku=SIC-1001', '/stock/view?sku=SIC-3003&warehouse=WH-MAN']) {
-      const { body } = get(path);
+      const { body } = await get(path);
       const tables = (body.match(/<table[\s>]/g) ?? []).length;
       const wrappers = (body.match(/<div class="table-scroll">/g) ?? []).length;
       assert.equal(tables, wrappers, `${path} has a table outside a scroll container`);
@@ -184,7 +200,7 @@ describe('the filter bar: plain dropdowns that apply themselves', () => {
 
   /* --- the controls are ordinary dropdowns -------------------------------- */
 
-  test('every list screen filters with real <select> elements, and no chips', () => {
+  test('every list screen filters with real <select> elements, and no chips', async () => {
     const expected = {
       '/products': ['Search', 'Category', 'Supplier'],
       '/stock': ['Search', 'Warehouse', 'Status'],
@@ -194,7 +210,7 @@ describe('the filter bar: plain dropdowns that apply themselves', () => {
     };
 
     for (const [screen, labels] of Object.entries(expected)) {
-      const { body } = get(screen);
+      const { body } = await get(screen);
       assert.deepEqual(controls(body).map((control) => control.label), labels, `${screen} filters`);
       assert.ok(bar(body).includes('<select'), `${screen} has no dropdown`);
       assert.match(bar(body), /method="get"/);
@@ -202,7 +218,7 @@ describe('the filter bar: plain dropdowns that apply themselves', () => {
     }
   });
 
-  test('every dropdown offers an All option, and it is the empty value', () => {
+  test('every dropdown offers an All option, and it is the empty value', async () => {
     const alls = {
       category: 'All categories',
       supplier: 'All suppliers',
@@ -216,7 +232,7 @@ describe('the filter bar: plain dropdowns that apply themselves', () => {
     };
 
     for (const screen of SCREENS) {
-      for (const control of controls(get(screen).body)) {
+      for (const control of controls((await get(screen)).body)) {
         if (control.kind !== 'select') continue;
         const first = control.options[0];
         assert.equal(first.value, '', `${screen} ${control.name}: the All option is not empty`);
@@ -225,55 +241,55 @@ describe('the filter bar: plain dropdowns that apply themselves', () => {
     }
   });
 
-  test('no screen renders an Apply button, or any button in a filter bar', () => {
+  test('no screen renders an Apply button, or any button in a filter bar', async () => {
     for (const screen of [...SCREENS, '/', '/products/add', '/audit/edit?id=AC-1001']) {
-      assert.equal(get(screen).body.includes('Apply'), false, `${screen} still says Apply`);
+      assert.equal((await get(screen)).body.includes('Apply'), false, `${screen} still says Apply`);
     }
     for (const screen of SCREENS) {
-      assert.equal((bar(get(screen).body).match(/<button/g) ?? []).length, 0, `${screen} has a button`);
-      assert.equal(bar(get(screen).body).includes('type="submit"'), false, `${screen} has a submit`);
+      assert.equal((bar((await get(screen)).body).match(/<button/g) ?? []).length, 0, `${screen} has a button`);
+      assert.equal(bar((await get(screen)).body).includes('type="submit"'), false, `${screen} has a submit`);
     }
   });
 
   /* --- choosing applies, and the rest is preserved ------------------------ */
 
-  test('choosing a category filters immediately', () => {
-    const start = get('/products').body;
+  test('choosing a category filters immediately', async () => {
+    const start = (await get('/products')).body;
     assert.equal(shown(start), '14 products');
 
     const url = submitWith(start, { category: 'Bulbs' });
 
     assert.equal(url, '/products?category=Bulbs');
-    assert.equal(shown(get(url).body), '3 of 14 products');
+    assert.equal(shown((await get(url)).body), '3 of 14 products');
   });
 
-  test('the chosen value comes back selected in the dropdown', () => {
-    const body = get('/products?category=Bulbs').body;
+  test('the chosen value comes back selected in the dropdown', async () => {
+    const body = (await get('/products?category=Bulbs')).body;
     const category = controls(body).find((control) => control.name === 'category');
 
     assert.equal(category.value, 'Bulbs');
     assert.match(bar(body), /<option value="Bulbs" selected>Bulbs<\/option>/);
   });
 
-  test('then choosing a supplier keeps the category', () => {
-    const withCategory = get('/products?category=Bulbs').body;
+  test('then choosing a supplier keeps the category', async () => {
+    const withCategory = (await get('/products?category=Bulbs')).body;
     const url = submitWith(withCategory, { supplier: 'Halden Electrical Supplies' });
 
     assert.equal(url, '/products?category=Bulbs&supplier=Halden+Electrical+Supplies');
-    assert.equal(shown(get(url).body), '2 of 14 products');
-    assert.deepEqual(settings(get(url).body), ['Category=Bulbs', 'Supplier=Halden Electrical Supplies']);
+    assert.equal(shown((await get(url)).body), '2 of 14 products');
+    assert.deepEqual(settings((await get(url)).body), ['Category=Bulbs', 'Supplier=Halden Electrical Supplies']);
   });
 
-  test('changing the supplier keeps the category', () => {
-    const both = get('/products?category=Bulbs&supplier=Halden+Electrical+Supplies').body;
+  test('changing the supplier keeps the category', async () => {
+    const both = (await get('/products?category=Bulbs&supplier=Halden+Electrical+Supplies')).body;
     const url = submitWith(both, { supplier: 'Verity Home Fittings' });
 
     assert.match(url, /category=Bulbs/);
     assert.match(url, /supplier=Verity\+Home\+Fittings/);
   });
 
-  test('changing the category keeps the supplier', () => {
-    const both = get('/products?category=Bulbs&supplier=Halden+Electrical+Supplies').body;
+  test('changing the category keeps the supplier', async () => {
+    const both = (await get('/products?category=Bulbs&supplier=Halden+Electrical+Supplies')).body;
     const url = submitWith(both, { category: 'Lamps' });
 
     assert.match(url, /category=Lamps/);
@@ -281,79 +297,79 @@ describe('the filter bar: plain dropdowns that apply themselves', () => {
     assert.match(url, /supplier=Halden/, 'the supplier was dropped');
   });
 
-  test('a search term rides along with the dropdowns', () => {
-    const body = get('/products?category=Bulbs').body;
+  test('a search term rides along with the dropdowns', async () => {
+    const body = (await get('/products?category=Bulbs')).body;
     const url = submitWith(body, { q: 'daylight' });
 
     assert.match(url, /category=Bulbs/);
     assert.match(url, /q=daylight/);
-    assert.equal(shown(get(url).body), '1 of 14 products');
+    assert.equal(shown((await get(url)).body), '1 of 14 products');
   });
 
   /* --- the All option ----------------------------------------------------- */
 
-  test('choosing All removes only that filter', () => {
-    const both = get('/products?category=Bulbs&supplier=Halden+Electrical+Supplies').body;
+  test('choosing All removes only that filter', async () => {
+    const both = (await get('/products?category=Bulbs&supplier=Halden+Electrical+Supplies')).body;
 
     const noCategory = submitWith(both, { category: '' });
     assert.equal(noCategory, '/products?supplier=Halden+Electrical+Supplies');
-    assert.equal(shown(get(noCategory).body), '3 of 14 products');
+    assert.equal(shown((await get(noCategory)).body), '3 of 14 products');
 
     const noSupplier = submitWith(both, { supplier: '' });
     assert.equal(noSupplier, '/products?category=Bulbs');
-    assert.equal(shown(get(noSupplier).body), '3 of 14 products');
+    assert.equal(shown((await get(noSupplier)).body), '3 of 14 products');
   });
 
-  test('with everything on All the URL carries no filters at all', () => {
-    const both = get('/products?category=Bulbs&supplier=Halden+Electrical+Supplies').body;
+  test('with everything on All the URL carries no filters at all', async () => {
+    const both = (await get('/products?category=Bulbs&supplier=Halden+Electrical+Supplies')).body;
 
     assert.equal(submitWith(both, { category: '', supplier: '' }), '/products');
   });
 
-  test('Clear filters appears once something is filtered, and resets everything', () => {
-    assert.equal(/<a class="reset"/.test(get('/products').body), false);
+  test('Clear filters appears once something is filtered, and resets everything', async () => {
+    assert.equal(/<a class="reset"/.test((await get('/products')).body), false);
 
-    const body = get('/products?category=Bulbs&supplier=Halden+Electrical+Supplies').body;
+    const body = (await get('/products?category=Bulbs&supplier=Halden+Electrical+Supplies')).body;
     const reset = body.match(/<a class="reset" href="([^"]+)">([^<]*)</);
 
     assert.ok(reset, 'no Clear filters link');
     assert.equal(reset[1], '/products');
     assert.equal(reset[2], 'Clear filters');
-    assert.equal(shown(get(reset[1]).body), '14 products');
+    assert.equal(shown((await get(reset[1])).body), '14 products');
   });
 
   /* --- every screen, every filter ----------------------------------------- */
 
-  test('each filter works on its own', () => {
-    const rows = (path) => Number(shown(get(path).body).split(' ')[0]);
+  test('each filter works on its own', async () => {
+    const rows = async (path) => Number(shown((await get(path)).body).split(' ')[0]);
 
-    assert.ok(rows('/stock?warehouse=WH-BIR') < rows('/stock'));
-    assert.ok(rows('/stock?status=Low+Stock') < rows('/stock'));
-    assert.ok(rows('/alerts?type=Low+Stock') < rows('/alerts'));
-    assert.ok(rows('/alerts?warehouse=WH-BIR') < rows('/alerts'));
-    assert.ok(rows('/transfers?status=Pending') < rows('/transfers'));
-    assert.ok(rows('/transfers?from=WH-BIR') < rows('/transfers'));
-    assert.ok(rows('/transfers?to=WH-MAN') < rows('/transfers'));
-    assert.ok(rows('/audit?warehouse=WH-BIR') < rows('/audit'));
-    assert.ok(rows('/audit?difference=yes') < rows('/audit'));
+    assert.ok(await rows('/stock?warehouse=WH-BIR') < await rows('/stock'));
+    assert.ok(await rows('/stock?status=Low+Stock') < await rows('/stock'));
+    assert.ok(await rows('/alerts?type=Low+Stock') < await rows('/alerts'));
+    assert.ok(await rows('/alerts?warehouse=WH-BIR') < await rows('/alerts'));
+    assert.ok(await rows('/transfers?status=Pending') < await rows('/transfers'));
+    assert.ok(await rows('/transfers?from=WH-BIR') < await rows('/transfers'));
+    assert.ok(await rows('/transfers?to=WH-MAN') < await rows('/transfers'));
+    assert.ok(await rows('/audit?warehouse=WH-BIR') < await rows('/audit'));
+    assert.ok(await rows('/audit?difference=yes') < await rows('/audit'));
   });
 
-  test('filters on the same screen combine with AND', () => {
-    const rows = (path) => Number(shown(get(path).body).split(' ')[0]);
+  test('filters on the same screen combine with AND', async () => {
+    const rows = async (path) => Number(shown((await get(path)).body).split(' ')[0]);
 
-    assert.ok(rows('/stock?warehouse=WH-BIR&status=Low+Stock') <= rows('/stock?warehouse=WH-BIR'));
-    assert.ok(rows('/alerts?type=Low+Stock&warehouse=WH-BIR') <= rows('/alerts?type=Low+Stock'));
-    assert.ok(rows('/audit?warehouse=WH-BIR&difference=yes') <= rows('/audit?warehouse=WH-BIR'));
+    assert.ok(await rows('/stock?warehouse=WH-BIR&status=Low+Stock') <= await rows('/stock?warehouse=WH-BIR'));
+    assert.ok(await rows('/alerts?type=Low+Stock&warehouse=WH-BIR') <= await rows('/alerts?type=Low+Stock'));
+    assert.ok(await rows('/audit?warehouse=WH-BIR&difference=yes') <= await rows('/audit?warehouse=WH-BIR'));
 
     // From and To are separate filters, so together they name one leg of a move.
-    const fromBir = rows('/transfers?from=WH-BIR');
-    const birToMan = rows('/transfers?from=WH-BIR&to=WH-MAN');
+    const fromBir = await rows('/transfers?from=WH-BIR');
+    const birToMan = await rows('/transfers?from=WH-BIR&to=WH-MAN');
     assert.ok(birToMan > 0 && birToMan <= fromBir);
   });
 
-  test('the transfers screen filters source and destination separately', () => {
-    const from = get('/transfers?from=WH-BIR').body;
-    const to = get('/transfers?to=WH-BIR').body;
+  test('the transfers screen filters source and destination separately', async () => {
+    const from = (await get('/transfers?from=WH-BIR')).body;
+    const to = (await get('/transfers?to=WH-BIR')).body;
 
     // Every row leaving Birmingham, and separately every row arriving there.
     assert.notEqual(shown(from), shown(to));
@@ -361,21 +377,21 @@ describe('the filter bar: plain dropdowns that apply themselves', () => {
     assert.deepEqual(settings(to), ['Status=All', 'Warehouse from=All', 'Warehouse to=WH-BIR']);
   });
 
-  test('the audit Show dropdown switches between all lines and discrepancies', () => {
-    assert.equal(shown(get('/audit').body), '10 audit lines');
-    assert.equal(shown(get('/audit?difference=yes').body), '5 of 10 audit lines');
-    assert.deepEqual(settings(get('/audit?difference=yes').body), ['Warehouse=All', 'Show=yes']);
+  test('the audit Show dropdown switches between all lines and discrepancies', async () => {
+    assert.equal(shown((await get('/audit')).body), '10 audit lines');
+    assert.equal(shown((await get('/audit?difference=yes')).body), '5 of 10 audit lines');
+    assert.deepEqual(settings((await get('/audit?difference=yes')).body), ['Warehouse=All', 'Show=yes']);
   });
 
-  test('an unknown value is dropped rather than applied', () => {
-    assert.equal(shown(get('/products?category=Bogus').body), '14 products');
-    assert.equal(shown(get('/stock?status=Nonsense').body), '32 stock lines');
+  test('an unknown value is dropped rather than applied', async () => {
+    assert.equal(shown((await get('/products?category=Bogus')).body), '14 products');
+    assert.equal(shown((await get('/stock?status=Nonsense')).body), '32 stock lines');
   });
 
   /* --- the auto-apply script ---------------------------------------------- */
 
-  test('the filter bar is wired to a script that submits it on change', () => {
-    const script = route('/filters.js');
+  test('the filter bar is wired to a script that submits it on change', async () => {
+    const script = await route('/filters.js');
 
     assert.equal(script.status, 200);
     assert.match(script.contentType, /javascript/);
@@ -385,13 +401,13 @@ describe('the filter bar: plain dropdowns that apply themselves', () => {
     assert.match(script.body, /field\.value === ""\) field\.disabled = true/, 'it keeps empty filters');
 
     for (const screen of SCREENS) {
-      assert.match(get(screen).body, /<script src="\/filters\.js" defer><\/script>/, `${screen}`);
+      assert.match((await get(screen)).body, /<script src="\/filters\.js" defer><\/script>/, `${screen}`);
     }
   });
 
-  test('the script is the only one, is served from this origin, and adds no dependency', () => {
+  test('the script is the only one, is served from this origin, and adds no dependency', async () => {
     for (const screen of [...SCREENS, '/', '/products/add', '/products/view?sku=SIC-1001']) {
-      const { body } = get(screen);
+      const { body } = await get(screen);
       const tags = body.match(/<script[^>]*>/g) ?? [];
 
       assert.equal(tags.length, 1, `${screen} has ${tags.length} script tags`);
@@ -403,52 +419,52 @@ describe('the filter bar: plain dropdowns that apply themselves', () => {
 });
 
 describe('the list screens offer the actions', () => {
-  test('products offers add, and view, edit and delete per row', () => {
-    const { body } = get('/products');
+  test('products offers add, and view, edit and delete per row', async () => {
+    const { body } = await get('/products');
     assert.ok(body.includes('href="/products/add"'), 'no add link');
     assert.ok(body.includes('href="/products/view?sku=SIC-1001"'), 'no view link');
     assert.ok(body.includes('href="/products/edit?sku=SIC-1001"'), 'no edit link');
     assert.ok(body.includes('href="/products/delete?sku=SIC-1001"'), 'no delete link');
   });
 
-  test('stock offers add, and view, edit and delete per row', () => {
-    const { body } = get('/stock');
+  test('stock offers add, and view, edit and delete per row', async () => {
+    const { body } = await get('/stock');
     assert.ok(body.includes('href="/stock/add"'));
     assert.ok(body.includes('sku=SIC-1001&amp;warehouse=WH-BIR'));
   });
 
-  test('transfers and audit offer add and the row actions', () => {
-    assert.ok(get('/transfers').body.includes('href="/transfers/add"'));
-    assert.ok(get('/transfers').body.includes('href="/transfers/view?id=TR-1001"'));
-    assert.ok(get('/audit').body.includes('href="/audit/add"'));
-    assert.ok(get('/audit').body.includes('href="/audit/view?id=AC-1001"'));
+  test('transfers and audit offer add and the row actions', async () => {
+    assert.ok((await get('/transfers')).body.includes('href="/transfers/add"'));
+    assert.ok((await get('/transfers')).body.includes('href="/transfers/view?id=TR-1001"'));
+    assert.ok((await get('/audit')).body.includes('href="/audit/add"'));
+    assert.ok((await get('/audit')).body.includes('href="/audit/view?id=AC-1001"'));
   });
 
-  test('alerts offers view and action, but no way to add or delete a detected issue', () => {
-    const { body } = get('/alerts');
+  test('alerts offers view and action, but no way to add or delete a detected issue', async () => {
+    const { body } = await get('/alerts');
     assert.ok(body.includes('/alerts/view?'), 'no view link');
     assert.ok(body.includes('/alerts/edit?'), 'no action link');
     assert.equal(body.includes('href="/alerts/add"'), false, 'issues can be invented by hand');
     assert.equal(body.includes('href="/alerts/delete?'), false, 'issues can be deleted by hand');
   });
 
-  test('a delete link goes to a confirmation page, not to the deletion', () => {
-    const before = findProduct('SIC-1001');
-    const response = get('/products/delete?sku=SIC-1001');
+  test('a delete link goes to a confirmation page, not to the deletion', async () => {
+    const before = await findProduct('SIC-1001');
+    const response = await get('/products/delete?sku=SIC-1001');
 
     assert.equal(response.status, 200);
     assert.match(response.body, /Delete SIC-1001\?/);
-    assert.equal(findProduct('SIC-1001'), before, 'a GET deleted the record');
+    assert.deepEqual(await findProduct('SIC-1001'), before, 'a GET changed the record');
   });
 
-  test('every action link on a list screen resolves', () => {
+  test('every action link on a list screen resolves', async () => {
     for (const screen of ['/products', '/stock', '/transfers', '/audit', '/alerts']) {
-      const { body } = get(screen);
+      const { body } = await get(screen);
       const hrefs = [...body.matchAll(/href="([^"]+)"/g)].map((match) => match[1]);
 
       for (const raw of hrefs) {
         const url = new URL(raw.replaceAll('&amp;', '&'), 'http://localhost');
-        assert.equal(route(url.pathname, url.searchParams).status, 200, `${raw} is a dead link`);
+        assert.equal((await route(url.pathname, url.searchParams)).status, 200, `${raw} is a dead link`);
       }
     }
   });
@@ -457,18 +473,18 @@ describe('the list screens offer the actions', () => {
 /* ========================================================================== */
 
 describe('products through the routes', () => {
-  test('add: the form is offered, the post is accepted, the product appears', () => {
-    assert.equal(get('/products/add').status, 200);
+  test('add: the form is offered, the post is accepted, the product appears', async () => {
+    assert.equal((await get('/products/add')).status, 200);
 
-    const response = post('/products/add', productForm());
+    const response = await post('/products/add', productForm());
     assert.equal(landedOn(response), '/products');
-    assert.ok(findProduct('SIC-8001'));
-    assert.ok(get('/products').body.includes('SIC-8001'));
+    assert.ok(await findProduct('SIC-8001'));
+    assert.ok((await get('/products')).body.includes('SIC-8001'));
   });
 
-  test('view: the detail screen shows every field', () => {
-    post('/products/add', productForm());
-    const { body, status } = get('/products/view?sku=SIC-8001');
+  test('view: the detail screen shows every field', async () => {
+    await post('/products/add', productForm());
+    const { body, status } = await get('/products/view?sku=SIC-8001');
 
     assert.equal(status, 200);
     for (const shown of ['SIC-8001', 'Test Pendant', 'Ceiling Lights', 'Northgate Lighting Ltd', 'Active']) {
@@ -477,58 +493,58 @@ describe('products through the routes', () => {
     assert.ok(body.includes('/images/SIC-8001.svg'), 'no product image');
   });
 
-  test('view: an unknown SKU is a 404, not a broken page', () => {
-    assert.equal(get('/products/view?sku=SIC-0000').status, 404);
+  test('view: an unknown SKU is a 404, not a broken page', async () => {
+    assert.equal((await get('/products/view?sku=SIC-0000')).status, 404);
   });
 
-  test('edit: the form is prefilled and the post is applied', () => {
-    const form = get('/products/edit?sku=SIC-1001').body;
+  test('edit: the form is prefilled and the post is applied', async () => {
+    const form = (await get('/products/edit?sku=SIC-1001')).body;
     assert.ok(form.includes('Aurora 3-Light Ceiling Pendant'), 'the form is not prefilled');
 
-    const response = post('/products/edit', productForm({ sku: 'SIC-1001', name: 'Renamed' }));
+    const response = await post('/products/edit', productForm({ sku: 'SIC-1001', name: 'Renamed' }));
 
     assert.equal(landedOn(response), '/products');
-    assert.equal(findProduct('SIC-1001').name, 'Renamed');
+    assert.equal((await findProduct('SIC-1001')).name, 'Renamed');
   });
 
-  test('a duplicate SKU comes back as the form, with the values and the reason', () => {
-    const response = post('/products/add', productForm({ sku: 'SIC-1001', name: 'Clash' }));
+  test('a duplicate SKU comes back as the form, with the values and the reason', async () => {
+    const response = await post('/products/add', productForm({ sku: 'SIC-1001', name: 'Clash' }));
 
     assert.equal(response.status, 400);
     assert.match(response.body, /already in the catalogue/);
     assert.ok(response.body.includes('value="Clash"'), 'the typed name was thrown away');
-    assert.equal(findProduct('SIC-1001').name, 'Aurora 3-Light Ceiling Pendant');
+    assert.equal((await findProduct('SIC-1001')).name, 'Aurora 3-Light Ceiling Pendant');
   });
 
-  test('an invalid listing status comes back as the form', () => {
-    const response = post('/products/add', productForm({ listing: 'Archived' }));
+  test('an invalid listing status comes back as the form', async () => {
+    const response = await post('/products/add', productForm({ listing: 'Archived' }));
 
     assert.equal(response.status, 400);
     assert.match(response.body, /Listing status must be/);
-    assert.equal(findProduct('SIC-8001'), null);
+    assert.equal(await findProduct('SIC-8001'), null);
   });
 
-  test('delete: a product nothing references goes on confirmation', () => {
-    post('/products/add', productForm());
+  test('delete: a product nothing references goes on confirmation', async () => {
+    await post('/products/add', productForm());
 
-    const response = post('/products/delete', { sku: 'SIC-8001' });
+    const response = await post('/products/delete', { sku: 'SIC-8001' });
 
     assert.equal(landedOn(response), '/products');
-    assert.equal(findProduct('SIC-8001'), null);
+    assert.equal(await findProduct('SIC-8001'), null);
   });
 
-  test('delete: a referenced product is refused until the removal is agreed to', () => {
-    const refused = post('/products/delete', { sku: 'SIC-1001' });
+  test('delete: a referenced product is refused until the removal is agreed to', async () => {
+    const refused = await post('/products/delete', { sku: 'SIC-1001' });
 
     assert.equal(refused.status, 400);
     assert.match(refused.body, /still referenced/);
-    assert.ok(findProduct('SIC-1001'), 'the product went anyway');
+    assert.ok(await findProduct('SIC-1001'), 'the product went anyway');
 
-    const agreed = post('/products/delete', { sku: 'SIC-1001', cascade: 'yes' });
+    const agreed = await post('/products/delete', { sku: 'SIC-1001', cascade: 'yes' });
 
     assert.equal(landedOn(agreed), '/products');
-    assert.equal(findProduct('SIC-1001'), null);
-    assert.equal(findStockLine('SIC-1001', 'WH-BIR'), null, 'a stock line was left dangling');
+    assert.equal(await findProduct('SIC-1001'), null);
+    assert.equal(await findStockLine('SIC-1001', 'WH-BIR'), null, 'a stock line was left dangling');
   });
 });
 
@@ -544,60 +560,60 @@ describe('warehouse stock through the routes', () => {
     ...overrides,
   });
 
-  test('add: the post is accepted and the line appears', () => {
-    assert.equal(get('/stock/add').status, 200);
+  test('add: the post is accepted and the line appears', async () => {
+    assert.equal((await get('/stock/add')).status, 200);
 
-    const response = post('/stock/add', stockFields());
+    const response = await post('/stock/add', stockFields());
 
     assert.equal(landedOn(response), '/stock');
-    assert.equal(findStockLine('SIC-1001', 'WH-BRS').onHand, 50);
+    assert.equal((await findStockLine('SIC-1001', 'WH-BRS')).onHand, 50);
   });
 
-  test('view: available is shown, worked out rather than stored', () => {
-    post('/stock/add', stockFields());
-    const { body } = get('/stock/view?sku=SIC-1001&warehouse=WH-BRS');
+  test('view: available is shown, worked out rather than stored', async () => {
+    await post('/stock/add', stockFields());
+    const { body } = await get('/stock/view?sku=SIC-1001&warehouse=WH-BRS');
 
     assert.match(body, /<strong>40<\/strong>/, 'available is not shown as 40');
     assert.match(body, /50 on hand minus 10 reserved/);
   });
 
-  test('the add and edit forms never offer an Available field', () => {
+  test('the add and edit forms never offer an Available field', async () => {
     for (const path of ['/stock/add', '/stock/edit?sku=SIC-1001&warehouse=WH-BIR']) {
-      const { body } = get(path);
+      const { body } = await get(path);
       assert.equal(body.includes('name="available"'), false, `${path} offers an Available field`);
     }
   });
 
-  test('edit: available is recalculated from the figures that were saved', () => {
-    const response = post('/stock/edit', {
+  test('edit: available is recalculated from the figures that were saved', async () => {
+    const response = await post('/stock/edit', {
       originalSku: 'SIC-1001',
       originalWarehouse: 'WH-BIR',
       ...stockFields({ warehouseId: 'WH-BIR', onHand: '30', reserved: '4' }),
     });
 
     assert.equal(landedOn(response), '/stock');
-    assert.match(get('/stock/view?sku=SIC-1001&warehouse=WH-BIR').body, /<strong>26<\/strong>/);
+    assert.match((await get('/stock/view?sku=SIC-1001&warehouse=WH-BIR')).body, /<strong>26<\/strong>/);
   });
 
-  test('a SKU that does not exist comes back as the form', () => {
-    const response = post('/stock/add', stockFields({ sku: 'SIC-0000' }));
+  test('a SKU that does not exist comes back as the form', async () => {
+    const response = await post('/stock/add', stockFields({ sku: 'SIC-0000' }));
 
     assert.equal(response.status, 400);
     assert.match(response.body, /not in the product catalogue/);
   });
 
-  test('a warehouse that does not exist comes back as the form', () => {
-    const response = post('/stock/add', stockFields({ warehouseId: 'WH-ZZZ' }));
+  test('a warehouse that does not exist comes back as the form', async () => {
+    const response = await post('/stock/add', stockFields({ warehouseId: 'WH-ZZZ' }));
 
     assert.equal(response.status, 400);
     assert.match(response.body, /not a recognised warehouse/);
   });
 
-  test('delete: the line goes on confirmation', () => {
-    const response = post('/stock/delete', { sku: 'SIC-1001', warehouse: 'WH-BIR' });
+  test('delete: the line goes on confirmation', async () => {
+    const response = await post('/stock/delete', { sku: 'SIC-1001', warehouse: 'WH-BIR' });
 
     assert.equal(landedOn(response), '/stock');
-    assert.equal(findStockLine('SIC-1001', 'WH-BIR'), null);
+    assert.equal(await findStockLine('SIC-1001', 'WH-BIR'), null);
   });
 });
 
@@ -606,8 +622,8 @@ describe('warehouse stock through the routes', () => {
 describe('alerts through the routes', () => {
   const shortage = 'type=Low+Stock&sku=SIC-1002&warehouse=WH-BIR';
 
-  test('view: the issue, the stock behind it and the action are all shown', () => {
-    const { body, status } = get(`/alerts/view?${shortage}`);
+  test('view: the issue, the stock behind it and the action are all shown', async () => {
+    const { body, status } = await get(`/alerts/view?${shortage}`);
 
     assert.equal(status, 200);
     assert.ok(body.includes('Low Stock'), 'no issue type');
@@ -617,8 +633,8 @@ describe('alerts through the routes', () => {
     assert.ok(body.includes('Action status'), 'no action status');
   });
 
-  test('an action status and a note can be recorded and are shown afterwards', () => {
-    const response = post('/alerts/edit', {
+  test('an action status and a note can be recorded and are shown afterwards', async () => {
+    const response = await post('/alerts/edit', {
       type: 'Low Stock',
       sku: 'SIC-1002',
       warehouse: 'WH-BIR',
@@ -627,13 +643,13 @@ describe('alerts through the routes', () => {
     });
 
     assert.equal(landedOn(response), '/alerts');
-    const { body } = get(`/alerts/view?${shortage}`);
+    const { body } = await get(`/alerts/view?${shortage}`);
     assert.ok(body.includes('In Progress'));
     assert.ok(body.includes('Chased the supplier on Tuesday.'));
   });
 
-  test('an invalid action status comes back as the form', () => {
-    const response = post('/alerts/edit', {
+  test('an invalid action status comes back as the form', async () => {
+    const response = await post('/alerts/edit', {
       type: 'Low Stock',
       sku: 'SIC-1002',
       warehouse: 'WH-BIR',
@@ -644,27 +660,27 @@ describe('alerts through the routes', () => {
     assert.match(response.body, /Action status must be/);
   });
 
-  test('RESOLVING AN ISSUE DOES NOT REMOVE IT WHILE THE STOCK IS STILL WRONG', () => {
-    const before = issuesReport().filter(
+  test('RESOLVING AN ISSUE DOES NOT REMOVE IT WHILE THE STOCK IS STILL WRONG', async () => {
+    const before = (await issuesReport()).filter(
       (issue) => issue.type === 'Low Stock' && issue.sku === 'SIC-1002' && issue.warehouseId === 'WH-BIR',
     );
     assert.equal(before.length, 1);
 
-    const response = post('/alerts/resolve', { type: 'Low Stock', sku: 'SIC-1002', warehouse: 'WH-BIR' });
+    const response = await post('/alerts/resolve', { type: 'Low Stock', sku: 'SIC-1002', warehouse: 'WH-BIR' });
     assert.equal(landedOn(response), '/alerts');
 
-    const after = issuesReport().filter(
+    const after = (await issuesReport()).filter(
       (issue) => issue.type === 'Low Stock' && issue.sku === 'SIC-1002' && issue.warehouseId === 'WH-BIR',
     );
     assert.equal(after.length, 1, 'the issue was silenced by a label');
     assert.equal(after[0].action.status, 'Resolved');
-    assert.ok(get('/alerts').body.includes('Resolved'), 'the alerts screen no longer lists it');
+    assert.ok((await get('/alerts')).body.includes('Resolved'), 'the alerts screen no longer lists it');
   });
 
-  test('the issue only goes when the stock that caused it is corrected', () => {
-    post('/alerts/resolve', { type: 'Low Stock', sku: 'SIC-1002', warehouse: 'WH-BIR' });
+  test('the issue only goes when the stock that caused it is corrected', async () => {
+    await post('/alerts/resolve', { type: 'Low Stock', sku: 'SIC-1002', warehouse: 'WH-BIR' });
 
-    post('/stock/edit', {
+    await post('/stock/edit', {
       originalSku: 'SIC-1002',
       originalWarehouse: 'WH-BIR',
       sku: 'SIC-1002',
@@ -674,34 +690,34 @@ describe('alerts through the routes', () => {
       minimum: '20',
     });
 
-    const after = issuesReport().filter(
+    const after = (await issuesReport()).filter(
       (issue) => issue.type === 'Low Stock' && issue.sku === 'SIC-1002' && issue.warehouseId === 'WH-BIR',
     );
     assert.equal(after.length, 0);
   });
 
-  test('an issue that is not being raised cannot be actioned', () => {
-    assert.equal(get('/alerts/view?type=Low+Stock&sku=SIC-1001&warehouse=WH-BIR').status, 404);
+  test('an issue that is not being raised cannot be actioned', async () => {
+    assert.equal((await get('/alerts/view?type=Low+Stock&sku=SIC-1001&warehouse=WH-BIR')).status, 404);
     assert.equal(
-      post('/alerts/edit', { type: 'Low Stock', sku: 'SIC-1001', warehouse: 'WH-BIR', status: 'Resolved' }).status,
+      (await post('/alerts/edit', { type: 'Low Stock', sku: 'SIC-1001', warehouse: 'WH-BIR', status: 'Resolved' })).status,
       404,
     );
   });
 
-  test('the alerts screen can be filtered by action status', () => {
-    post('/alerts/edit', {
+  test('the alerts screen can be filtered by action status', async () => {
+    await post('/alerts/edit', {
       type: 'Low Stock',
       sku: 'SIC-1002',
       warehouse: 'WH-BIR',
       status: 'Resolved',
     });
 
-    const open = get('/alerts?action=Open');
-    const resolved = get('/alerts?action=Resolved');
+    const open = await get('/alerts?action=Open');
+    const resolved = await get('/alerts?action=Resolved');
 
     assert.equal(open.status, 200);
     assert.equal(resolved.status, 200);
-    assert.equal(issueAction({ type: 'Low Stock', sku: 'SIC-1002', warehouseId: 'WH-BIR' }).status, 'Resolved');
+    assert.equal((await issueAction({ type: 'Low Stock', sku: 'SIC-1002', warehouseId: 'WH-BIR' })).status, 'Resolved');
   });
 });
 
@@ -718,56 +734,56 @@ describe('transfers through the routes', () => {
     ...overrides,
   });
 
-  test('add, view, edit and delete run end to end', () => {
-    assert.equal(get('/transfers/add').status, 200);
+  test('add, view, edit and delete run end to end', async () => {
+    assert.equal((await get('/transfers/add')).status, 200);
 
-    const added = post('/transfers/add', transferFields());
+    const added = await post('/transfers/add', transferFields());
     assert.equal(landedOn(added), '/transfers');
     const id = new URL(added.location, 'http://x').searchParams.get('subject');
 
-    const view = get(`/transfers/view?id=${id}`);
+    const view = await get(`/transfers/view?id=${id}`);
     assert.equal(view.status, 200);
     assert.ok(view.body.includes(id));
     assert.ok(view.body.includes('Pending'));
 
-    const edited = post('/transfers/edit', { id, ...transferFields({ status: 'Received' }) });
+    const edited = await post('/transfers/edit', { id, ...transferFields({ status: 'Received' }) });
     assert.equal(landedOn(edited), '/transfers');
-    assert.equal(findTransfer(id).status, 'Received');
+    assert.equal((await findTransfer(id)).status, 'Received');
 
-    assert.equal(get(`/transfers/delete?id=${id}`).status, 200);
-    assert.ok(findTransfer(id), 'the confirmation page deleted the transfer');
+    assert.equal((await get(`/transfers/delete?id=${id}`)).status, 200);
+    assert.ok(await findTransfer(id), 'the confirmation page deleted the transfer');
 
-    const deleted = post('/transfers/delete', { id });
+    const deleted = await post('/transfers/delete', { id });
     assert.equal(landedOn(deleted), '/transfers');
-    assert.equal(findTransfer(id), null);
+    assert.equal(await findTransfer(id), null);
   });
 
-  test('an invalid warehouse comes back as the form', () => {
-    const response = post('/transfers/add', transferFields({ toWarehouseId: 'WH-ZZZ' }));
+  test('an invalid warehouse comes back as the form', async () => {
+    const response = await post('/transfers/add', transferFields({ toWarehouseId: 'WH-ZZZ' }));
 
     assert.equal(response.status, 400);
     assert.match(response.body, /not a recognised warehouse/);
   });
 
-  test('the same warehouse at both ends comes back as the form', () => {
-    const response = post('/transfers/add', transferFields({ toWarehouseId: 'WH-BIR' }));
+  test('the same warehouse at both ends comes back as the form', async () => {
+    const response = await post('/transfers/add', transferFields({ toWarehouseId: 'WH-BIR' }));
 
     assert.equal(response.status, 400);
     assert.match(response.body, /two different warehouses/);
   });
 
-  test('an invalid status comes back as the form', () => {
-    const response = post('/transfers/add', transferFields({ status: 'Cancelled' }));
+  test('an invalid status comes back as the form', async () => {
+    const response = await post('/transfers/add', transferFields({ status: 'Cancelled' }));
 
     assert.equal(response.status, 400);
     assert.match(response.body, /Status must be one of/);
   });
 
-  test('a transfer still moves no stock', () => {
-    const before = findStockLine('SIC-1001', 'WH-BIR').onHand;
-    post('/transfers/add', transferFields({ quantity: '999' }));
+  test('a transfer still moves no stock', async () => {
+    const before = (await findStockLine('SIC-1001', 'WH-BIR')).onHand;
+    await post('/transfers/add', transferFields({ quantity: '999' }));
 
-    assert.equal(findStockLine('SIC-1001', 'WH-BIR').onHand, before);
+    assert.equal((await findStockLine('SIC-1001', 'WH-BIR')).onHand, before);
   });
 });
 
@@ -784,50 +800,50 @@ describe('audit through the routes', () => {
     ...overrides,
   });
 
-  test('add, view, edit and delete run end to end', () => {
-    assert.equal(get('/audit/add').status, 200);
+  test('add, view, edit and delete run end to end', async () => {
+    assert.equal((await get('/audit/add')).status, 200);
 
-    const added = post('/audit/add', auditFields());
+    const added = await post('/audit/add', auditFields());
     assert.equal(landedOn(added), '/audit');
     const id = new URL(added.location, 'http://x').searchParams.get('subject');
 
-    const view = get(`/audit/view?id=${id}`);
+    const view = await get(`/audit/view?id=${id}`);
     assert.equal(view.status, 200);
     assert.match(view.body, />-4</, 'the difference is not shown');
     assert.match(view.body, /Discrepancy/);
 
-    const edited = post('/audit/edit', { id, ...auditFields({ countedQuantity: '84' }) });
+    const edited = await post('/audit/edit', { id, ...auditFields({ countedQuantity: '84' }) });
     assert.equal(landedOn(edited), '/audit');
-    assert.match(get(`/audit/view?id=${id}`).body, /Matches/, 'the difference did not recalculate');
+    assert.match((await get(`/audit/view?id=${id}`)).body, /Matches/, 'the difference did not recalculate');
 
-    const deleted = post('/audit/delete', { id });
+    const deleted = await post('/audit/delete', { id });
     assert.equal(landedOn(deleted), '/audit');
-    assert.equal(findAuditCount(id), null);
+    assert.equal(await findAuditCount(id), null);
   });
 
-  test('the difference follows the counted figure, in both directions', () => {
-    const over = post('/audit/add', auditFields({ countedQuantity: '90' }));
+  test('the difference follows the counted figure, in both directions', async () => {
+    const over = await post('/audit/add', auditFields({ countedQuantity: '90' }));
     const id = new URL(over.location, 'http://x').searchParams.get('subject');
 
-    assert.match(get(`/audit/view?id=${id}`).body, />\+6</, 'an overage is not signed');
+    assert.match((await get(`/audit/view?id=${id}`)).body, />\+6</, 'an overage is not signed');
 
-    post('/audit/edit', { id, ...auditFields({ countedQuantity: '70' }) });
-    assert.match(get(`/audit/view?id=${id}`).body, />-14</, 'a shortage is not signed');
+    await post('/audit/edit', { id, ...auditFields({ countedQuantity: '70' }) });
+    assert.match((await get(`/audit/view?id=${id}`)).body, />-14</, 'a shortage is not signed');
   });
 
-  test('the add and edit forms never offer a Difference field', () => {
+  test('the add and edit forms never offer a Difference field', async () => {
     for (const path of ['/audit/add', '/audit/edit?id=AC-1001']) {
-      assert.equal(get(path).body.includes('name="difference"'), false, `${path} offers one`);
+      assert.equal((await get(path)).body.includes('name="difference"'), false, `${path} offers one`);
     }
   });
 
-  test('the add form prefills the system figure from the stock data', () => {
-    const { body } = get('/audit/add?sku=SIC-1001&warehouse=WH-BIR');
+  test('the add form prefills the system figure from the stock data', async () => {
+    const { body } = await get('/audit/add?sku=SIC-1001&warehouse=WH-BIR');
     assert.ok(body.includes('value="84"'), 'the system figure was not prefilled');
   });
 
-  test('a negative physical count comes back as the form', () => {
-    const response = post('/audit/add', auditFields({ countedQuantity: '-1' }));
+  test('a negative physical count comes back as the form', async () => {
+    const response = await post('/audit/add', auditFields({ countedQuantity: '-1' }));
 
     assert.equal(response.status, 400);
     assert.match(response.body, /cannot be below zero/);
@@ -847,27 +863,27 @@ describe('the dashboard follows the data', () => {
     return Number(match[1]);
   }
 
-  test('adding a product raises Total SKUs', () => {
-    const before = tileValue(get('/').body, 'Total SKUs');
+  test('adding a product raises Total SKUs', async () => {
+    const before = tileValue((await get('/')).body, 'Total SKUs');
 
-    post('/products/add', productForm());
+    await post('/products/add', productForm());
 
-    assert.equal(tileValue(get('/').body, 'Total SKUs'), before + 1);
+    assert.equal(tileValue((await get('/')).body, 'Total SKUs'), before + 1);
   });
 
-  test('deleting a product lowers Total SKUs', () => {
-    post('/products/add', productForm());
-    const before = tileValue(get('/').body, 'Total SKUs');
+  test('deleting a product lowers Total SKUs', async () => {
+    await post('/products/add', productForm());
+    const before = tileValue((await get('/')).body, 'Total SKUs');
 
-    post('/products/delete', { sku: 'SIC-8001' });
+    await post('/products/delete', { sku: 'SIC-8001' });
 
-    assert.equal(tileValue(get('/').body, 'Total SKUs'), before - 1);
+    assert.equal(tileValue((await get('/')).body, 'Total SKUs'), before - 1);
   });
 
-  test('a stock edit that fixes a shortage lowers Low Stock', () => {
-    const before = tileValue(get('/').body, 'Low Stock');
+  test('a stock edit that fixes a shortage lowers Low Stock', async () => {
+    const before = tileValue((await get('/')).body, 'Low Stock');
 
-    post('/stock/edit', {
+    await post('/stock/edit', {
       originalSku: 'SIC-1002',
       originalWarehouse: 'WH-BIR',
       sku: 'SIC-1002',
@@ -877,13 +893,13 @@ describe('the dashboard follows the data', () => {
       minimum: '20',
     });
 
-    assert.equal(tileValue(get('/').body, 'Low Stock'), before - 1);
+    assert.equal(tileValue((await get('/')).body, 'Low Stock'), before - 1);
   });
 
-  test('a stock edit that creates a shortage raises Low Stock', () => {
-    const before = tileValue(get('/').body, 'Low Stock');
+  test('a stock edit that creates a shortage raises Low Stock', async () => {
+    const before = tileValue((await get('/')).body, 'Low Stock');
 
-    post('/stock/edit', {
+    await post('/stock/edit', {
       originalSku: 'SIC-1001',
       originalWarehouse: 'WH-BIR',
       sku: 'SIC-1001',
@@ -893,12 +909,12 @@ describe('the dashboard follows the data', () => {
       minimum: '25',
     });
 
-    assert.equal(tileValue(get('/').body, 'Low Stock'), before + 1);
+    assert.equal(tileValue((await get('/')).body, 'Low Stock'), before + 1);
   });
 
-  test('a new stock line in a bad state shows up on the alerts screen', () => {
-    post('/products/add', productForm({ sku: 'SIC-8002', approvedWarehouses: ['WH-BIR'] }));
-    post('/stock/add', {
+  test('a new stock line in a bad state shows up on the alerts screen', async () => {
+    await post('/products/add', productForm({ sku: 'SIC-8002', approvedWarehouses: ['WH-BIR'] }));
+    await post('/stock/add', {
       sku: 'SIC-8002',
       warehouseId: 'WH-BIR',
       onHand: '3',
@@ -906,25 +922,25 @@ describe('the dashboard follows the data', () => {
       minimum: '40',
     });
 
-    const raised = issuesReport().filter((issue) => issue.sku === 'SIC-8002');
+    const raised = (await issuesReport()).filter((issue) => issue.sku === 'SIC-8002');
     assert.equal(raised.length, 1);
     assert.equal(raised[0].type, 'Low Stock');
-    assert.ok(get('/alerts').body.includes('SIC-8002'), 'the new issue is not listed');
+    assert.ok((await get('/alerts')).body.includes('SIC-8002'), 'the new issue is not listed');
   });
 
-  test('deleting an audit record that disagreed lowers Discrepancies', () => {
-    const before = tileValue(get('/').body, 'Discrepancies');
+  test('deleting an audit record that disagreed lowers Discrepancies', async () => {
+    const before = tileValue((await get('/')).body, 'Discrepancies');
 
     // AC-1002 counted 15 against a system figure of 18.
-    post('/audit/delete', { id: 'AC-1002' });
+    await post('/audit/delete', { id: 'AC-1002' });
 
-    assert.equal(tileValue(get('/').body, 'Discrepancies'), before - 1);
+    assert.equal(tileValue((await get('/')).body, 'Discrepancies'), before - 1);
   });
 
-  test('raising a pending transfer raises Pending Transfers', () => {
-    const before = tileValue(get('/').body, 'Pending Transfers');
+  test('raising a pending transfer raises Pending Transfers', async () => {
+    const before = tileValue((await get('/')).body, 'Pending Transfers');
 
-    post('/transfers/add', {
+    await post('/transfers/add', {
       sku: 'SIC-1001',
       fromWarehouseId: 'WH-BIR',
       toWarehouseId: 'WH-MAN',
@@ -933,20 +949,20 @@ describe('the dashboard follows the data', () => {
       raisedOn: '2026-09-10',
     });
 
-    assert.equal(tileValue(get('/').body, 'Pending Transfers'), before + 1);
+    assert.equal(tileValue((await get('/')).body, 'Pending Transfers'), before + 1);
   });
 
-  test('the stock bands still add up to the number of stock lines after edits', () => {
-    post('/stock/add', {
+  test('the stock bands still add up to the number of stock lines after edits', async () => {
+    await post('/stock/add', {
       sku: 'SIC-1001',
       warehouseId: 'WH-BRS',
       onHand: '-3',
       reserved: '0',
       minimum: '10',
     });
-    post('/stock/delete', { sku: 'SIC-1001', warehouse: 'WH-BIR' });
+    await post('/stock/delete', { sku: 'SIC-1001', warehouse: 'WH-BIR' });
 
-    const metrics = dashboardMetrics();
+    const metrics = await dashboardMetrics();
     assert.equal(
       metrics.healthyStock + metrics.lowStock + metrics.outOfStock + metrics.negativeInventory,
       metrics.totalStockLines,
@@ -955,8 +971,8 @@ describe('the dashboard follows the data', () => {
 });
 
 describe('the six detection rules still work after CRUD', () => {
-  test('every issue type is still one of the six declared ones', () => {
-    post('/stock/add', {
+  test('every issue type is still one of the six declared ones', async () => {
+    await post('/stock/add', {
       sku: 'SIC-1001',
       warehouseId: 'WH-BRS',
       onHand: '2',
@@ -964,14 +980,14 @@ describe('the six detection rules still work after CRUD', () => {
       minimum: '20',
     });
 
-    for (const issue of issuesReport()) {
+    for (const issue of await issuesReport()) {
       assert.ok(ISSUE_TYPES.includes(issue.type), `${issue.type} is not a declared issue type`);
     }
   });
 
-  test('a line added at a site the SKU is not approved for is caught as a mismatch', () => {
-    post('/products/add', productForm({ sku: 'SIC-8003', approvedWarehouses: ['WH-BIR'] }));
-    post('/stock/add', {
+  test('a line added at a site the SKU is not approved for is caught as a mismatch', async () => {
+    await post('/products/add', productForm({ sku: 'SIC-8003', approvedWarehouses: ['WH-BIR'] }));
+    await post('/stock/add', {
       sku: 'SIC-8003',
       warehouseId: 'WH-LDS',
       onHand: '10',
@@ -979,33 +995,33 @@ describe('the six detection rules still work after CRUD', () => {
       minimum: '1',
     });
 
-    const raised = issuesReport().filter((issue) => issue.sku === 'SIC-8003');
+    const raised = (await issuesReport()).filter((issue) => issue.sku === 'SIC-8003');
     assert.ok(
       raised.some((issue) => issue.type === 'Warehouse/SKU Mismatch'),
       'a SKU held at an unapproved site was not reported',
     );
   });
 
-  test('withdrawing a listing that still holds stock is caught as an inactive listing', () => {
-    post('/products/edit', productForm({ sku: 'SIC-1001', listing: 'Inactive' }));
+  test('withdrawing a listing that still holds stock is caught as an inactive listing', async () => {
+    await post('/products/edit', productForm({ sku: 'SIC-1001', listing: 'Inactive' }));
 
-    const raised = issuesReport().filter(
+    const raised = (await issuesReport()).filter(
       (issue) => issue.sku === 'SIC-1001' && issue.type === 'Inactive Listing',
     );
     assert.ok(raised.length > 0, 'a withdrawn listing holding stock was not reported');
   });
 
-  test('a product edited down to no movement is caught as slow-moving', () => {
-    post('/products/edit', productForm({ sku: 'SIC-1001', unitsSoldLast90Days: '1' }));
+  test('a product edited down to no movement is caught as slow-moving', async () => {
+    await post('/products/edit', productForm({ sku: 'SIC-1001', unitsSoldLast90Days: '1' }));
 
-    const raised = issuesReport().filter(
+    const raised = (await issuesReport()).filter(
       (issue) => issue.sku === 'SIC-1001' && issue.type === 'Slow-Moving Stock',
     );
     assert.ok(raised.length > 0, 'a barely-moving product was not reported');
   });
 
-  test('Low Stock and Out of Stock still never apply to the same line', () => {
-    post('/stock/add', {
+  test('Low Stock and Out of Stock still never apply to the same line', async () => {
+    await post('/stock/add', {
       sku: 'SIC-1001',
       warehouseId: 'WH-BRS',
       onHand: '5',
@@ -1013,7 +1029,7 @@ describe('the six detection rules still work after CRUD', () => {
       minimum: '20',
     });
 
-    const raised = issuesReport().filter(
+    const raised = (await issuesReport()).filter(
       (issue) => issue.sku === 'SIC-1001' && issue.warehouseId === 'WH-BRS',
     );
     const bands = raised.map((issue) => issue.type).filter((type) => type === 'Low Stock' || type === 'Out of Stock');
@@ -1024,35 +1040,35 @@ describe('the six detection rules still work after CRUD', () => {
 /* ========================================================================== */
 
 describe('nothing destructive is reachable by a GET', () => {
-  test('the delete confirmation screens change nothing', () => {
+  test('the delete confirmation screens change nothing', async () => {
     const before = {
-      products: findProduct('SIC-1001'),
-      stock: findStockLine('SIC-1001', 'WH-BIR'),
-      transfer: findTransfer('TR-1001'),
-      audit: findAuditCount('AC-1001'),
+      products: await findProduct('SIC-1001'),
+      stock: await findStockLine('SIC-1001', 'WH-BIR'),
+      transfer: await findTransfer('TR-1001'),
+      audit: await findAuditCount('AC-1001'),
     };
 
-    get('/products/delete?sku=SIC-1001');
-    get('/stock/delete?sku=SIC-1001&warehouse=WH-BIR');
-    get('/transfers/delete?id=TR-1001');
-    get('/audit/delete?id=AC-1001');
+    await get('/products/delete?sku=SIC-1001');
+    await get('/stock/delete?sku=SIC-1001&warehouse=WH-BIR');
+    await get('/transfers/delete?id=TR-1001');
+    await get('/audit/delete?id=AC-1001');
 
-    assert.equal(findProduct('SIC-1001'), before.products);
-    assert.equal(findStockLine('SIC-1001', 'WH-BIR'), before.stock);
-    assert.equal(findTransfer('TR-1001'), before.transfer);
-    assert.equal(findAuditCount('AC-1001'), before.audit);
+    assert.deepEqual(await findProduct('SIC-1001'), before.products);
+    assert.deepEqual(await findStockLine('SIC-1001', 'WH-BIR'), before.stock);
+    assert.deepEqual(await findTransfer('TR-1001'), before.transfer);
+    assert.deepEqual(await findAuditCount('AC-1001'), before.audit);
   });
 
-  test('a delete form asks before it acts', () => {
-    const { body } = get('/transfers/delete?id=TR-1001');
+  test('a delete form asks before it acts', async () => {
+    const { body } = await get('/transfers/delete?id=TR-1001');
 
     assert.match(body, /Delete transfer TR-1001\?/);
     assert.match(body, /<form class="record" method="post" action="\/transfers\/delete">/);
   });
 
-  test('an unknown record posted at is a 404, not a crash', () => {
-    assert.equal(post('/transfers/delete', { id: 'TR-0000' }).status, 404);
-    assert.equal(post('/audit/edit', { id: 'AC-0000' }).status, 404);
-    assert.equal(post('/nowhere', {}).status, 404);
+  test('an unknown record posted at is a 404, not a crash', async () => {
+    assert.equal((await post('/transfers/delete', { id: 'TR-0000' })).status, 404);
+    assert.equal((await post('/audit/edit', { id: 'AC-0000' })).status, 404);
+    assert.equal((await post('/nowhere', {})).status, 404);
   });
 });

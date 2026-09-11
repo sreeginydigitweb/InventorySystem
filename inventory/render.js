@@ -220,7 +220,7 @@ const STYLES = `
 
   h2 { font-size: 1rem; margin: 1.75rem 0 .6rem; }
 
-  /* Filters. Ordinary selects in one GET form; /filters.js submits that form
+  /* Filters. One GET form of plain dropdowns; /filters.js submits that form
      as soon as any control in it changes, so there is nothing to press. */
   .filters {
     display: flex; flex-wrap: wrap; gap: .7rem .9rem; align-items: flex-end;
@@ -229,15 +229,36 @@ const STYLES = `
   }
   .filters .field { display: flex; flex-direction: column; gap: .28rem; min-width: 0; max-width: 100%; }
   .filters .caption { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-  .filters select, .filters input[type="search"] {
+  .filters input[type="search"] {
     font: inherit; color: var(--ink); background: #fff; min-height: 36px; max-width: 100%;
     border: 1px solid var(--line); border-radius: 4px; padding: .3rem .5rem;
+    min-width: 15rem;
   }
-  .filters select { min-width: 11rem; }
-  .filters input[type="search"] { min-width: 15rem; }
-  .filters select:focus-visible, .filters input:focus-visible {
+  .filters input[type="search"]:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 1px;
   }
+
+  /* The dropdowns.
+
+     A real <select>, styled only as far as its box: the browser draws the list,
+     opens it from the keyboard and turns it into a native picker on a phone.
+     The chevron is drawn in CSS rather than loaded, and appearance: none is
+     what stops the platform drawing a second one next to it. */
+  .filters select {
+    font: inherit; color: var(--ink); cursor: pointer;
+    min-height: 36px; min-width: 11rem; max-width: 100%;
+    padding: .3rem 1.9rem .3rem .5rem;
+    border: 1px solid var(--line); border-radius: 4px;
+    appearance: none; -webkit-appearance: none;
+    background-color: #fff;
+    background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                      linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+    background-position: right 1.05rem center, right .75rem center;
+    background-size: .3rem .3rem, .3rem .3rem;
+    background-repeat: no-repeat;
+  }
+  .filters select:hover { border-color: #b6bfca; }
+  .filters select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   button {
     font: inherit; min-height: 34px; padding: .3rem .9rem; cursor: pointer;
     background: var(--accent); color: #fff; border: 1px solid var(--accent); border-radius: 4px;
@@ -299,7 +320,8 @@ const STYLES = `
     /* Filter groups share the row and wrap onto the next one rather than being
        pushed off the edge. */
     .filters .field { flex: 1 1 13rem; }
-    .filters select, .filters input[type="search"] { width: 100%; min-width: 0; }
+    .filters input[type="search"] { width: 100%; min-width: 0; }
+    .filters select { min-width: 0; }
     td.name { min-width: 11rem; }
     td.reason { min-width: 13rem; }
   }
@@ -322,9 +344,10 @@ const STYLES = `
     .filters .field { flex: 1 1 100%; }
     /* Full width, a comfortable tap target, and 16px so mobile browsers do not
        zoom the page when a control takes focus. */
-    .filters select, .filters input[type="search"] {
+    .filters input[type="search"] {
       width: 100%; min-width: 0; font-size: 16px; min-height: 44px;
     }
+    .filters select { width: 100%; min-width: 0; font-size: 16px; min-height: 44px; }
     a.reset { align-self: flex-start; padding: .25rem 0; }
     .scroll-hint { display: block; }
     table { font-size: .92rem; }
@@ -490,19 +513,25 @@ ${banner}${body}
 /**
  * Build the filter bar from a list of controls.
  *
- * The bar is one ordinary GET form of ordinary <select> elements. There is no
- * Apply button: /filters.js submits the form as soon as any control in it
- * changes, so choosing an option applies it immediately.
+ * The bar is one ordinary GET form. There is no Apply button: /filters.js
+ * submits the form the moment anything in it changes, so choosing a value
+ * applies it immediately.
  *
- * Because every filter sits in the SAME form, keeping the others is not
- * something this code has to arrange - submitting the form sends all of them.
- * Change the supplier and the category goes along with it untouched, and the
- * resulting URL - ?category=Bulbs&supplier=Halden... - is a readable, shareable
- * description of exactly what is on screen.
+ * Each group is a plain <select>. Not a custom widget, not a panel of
+ * checkboxes - the control the browser already knows how to draw, open with a
+ * keyboard and turn into a native picker on a phone. One choice per group, so
+ * what is on screen can always be read off the dropdowns without opening
+ * anything.
  *
- * Each group is a single choice. Every group offers an "All" option whose value
- * is empty; the script drops empty fields on the way out, so choosing it
- * removes just that one parameter from the URL.
+ * "All" is the first option of every group and its value is the empty string.
+ * Choosing it is how a filter is removed, and because /filters.js drops empty
+ * fields before submitting, the URL - ?category=Bulbs&supplier=Halden... -
+ * stays a readable, shareable description of exactly what is on screen. The
+ * groups sit in the SAME form, so keeping the others is not something this
+ * code has to arrange: submitting the form sends all of them.
+ *
+ * Separate groups are separate conditions on the same row and AND together, so
+ * a category and a supplier narrow.
  *
  * @param {object} options
  * @param {string} options.action        Path the filters submit to.
@@ -511,31 +540,34 @@ ${banner}${body}
  * @returns {string}
  */
 function renderFilters({ action, controls, showReset }) {
-  const field = (control, inner) => `<div class="field">
-        <label class="caption" for="f-${escapeHtml(control.name)}">${escapeHtml(control.label)}</label>
-        ${inner}
-      </div>`;
-
   const fields = controls
     .map((control) => {
+      const id = `f-${control.name}`;
+
       if (control.kind === 'search') {
-        return field(
-          control,
-          `<input type="search" id="f-${escapeHtml(control.name)}" name="${escapeHtml(control.name)}" value="${escapeHtml(control.value ?? '')}" placeholder="${escapeHtml(control.placeholder ?? '')}">`,
-        );
+        return `<div class="field">
+        <label class="caption" for="${escapeHtml(id)}">${escapeHtml(control.label)}</label>
+        <input type="search" id="${escapeHtml(id)}" name="${escapeHtml(control.name)}" value="${escapeHtml(control.value ?? '')}" placeholder="${escapeHtml(control.placeholder ?? '')}">
+      </div>`;
       }
 
-      const options = control.options
-        .map((option) => {
-          const selected = option.value === (control.value ?? '') ? ' selected' : '';
-          return `<option value="${escapeHtml(option.value)}"${selected}>${escapeHtml(option.label)}</option>`;
-        })
+      // The chosen value, narrowed to one the control actually offers. A value
+      // the route did not recognise leaves the dropdown on All rather than
+      // adding an option for it, so the bar never claims to be filtered by
+      // something the list is not filtered by.
+      const chosen = String(control.value ?? '');
+
+      const options = [{ value: '', label: control.allLabel }, ...control.options]
+        .map(
+          (option) =>
+            `<option value="${escapeHtml(option.value)}"${option.value === chosen ? ' selected' : ''}>${escapeHtml(option.label)}</option>`,
+        )
         .join('');
 
-      return field(
-        control,
-        `<select id="f-${escapeHtml(control.name)}" name="${escapeHtml(control.name)}">${options}</select>`,
-      );
+      return `<div class="field">
+        <label class="caption" for="${escapeHtml(id)}">${escapeHtml(control.label)}</label>
+        <select id="${escapeHtml(id)}" name="${escapeHtml(control.name)}">${options}</select>
+      </div>`;
     })
     .join('\n      ');
 
@@ -930,7 +962,7 @@ export function renderDashboardPage({ metrics, issueCounts, transferCounts }) {
     tile('/stock?status=Healthy', metrics.healthyStock, 'Healthy Stock', 'stock lines', 'ok'),
     tile('/stock?status=Low+Stock', metrics.lowStock, 'Low Stock', 'stock lines', 'warn'),
     tile('/stock?status=Out+of+Stock', metrics.outOfStock, 'Out-of-Stock Items', 'stock lines', 'bad'),
-    tile('/audit?difference=only', metrics.discrepancies, 'Discrepancies', 'audit lines that disagree', 'bad'),
+    tile('/audit?show=discrepancy', metrics.discrepancies, 'Discrepancies', 'audit lines that disagree', 'bad'),
     tile('/transfers?status=Pending', metrics.pendingTransfers, 'Pending Transfers', 'awaiting despatch', 'warn'),
   ].join('\n');
 
@@ -1035,18 +1067,18 @@ export function renderProductsPage({
     controls: [
       { kind: 'search', name: 'q', label: 'Search', value: search, placeholder: 'SKU, name or supplier' },
       {
-        kind: 'select',
         name: 'category',
         label: 'Category',
+        allLabel: 'All categories',
         value: category,
-        options: [{ value: '', label: 'All categories' }, ...categories.map((c) => ({ value: c, label: c }))],
+        options: categories.map((c) => ({ value: c, label: c })),
       },
       {
-        kind: 'select',
         name: 'supplier',
         label: 'Supplier',
+        allLabel: 'All suppliers',
         value: supplier,
-        options: [{ value: '', label: 'All suppliers' }, ...suppliers.map((s) => ({ value: s, label: s }))],
+        options: suppliers.map((sup) => ({ value: sup, label: sup })),
       },
     ],
   });
@@ -1141,21 +1173,18 @@ export function renderStockPage({
     controls: [
       { kind: 'search', name: 'q', label: 'Search', value: search, placeholder: 'SKU or product name' },
       {
-        kind: 'select',
         name: 'warehouse',
         label: 'Warehouse',
+        allLabel: 'All warehouses',
         value: warehouseId,
-        options: [
-          { value: '', label: 'All warehouses' },
-          ...warehouses.map((w) => ({ value: w.id, label: w.name })),
-        ],
+        options: warehouses.map((w) => ({ value: w.id, label: w.name })),
       },
       {
-        kind: 'select',
         name: 'status',
         label: 'Status',
+        allLabel: 'All statuses',
         value: status,
-        options: [{ value: '', label: 'All statuses' }, ...statuses.map((s) => ({ value: s, label: s }))],
+        options: statuses.map((st) => ({ value: st, label: st })),
       },
     ],
   });
@@ -1225,31 +1254,25 @@ export function renderIssuesPage({
     showReset: Boolean(type || warehouseId || actionStatus),
     controls: [
       {
-        kind: 'select',
         name: 'type',
         label: 'Issue type',
+        allLabel: 'All issue types',
         value: type,
-        options: [{ value: '', label: 'All issue types' }, ...issueTypes.map((t) => ({ value: t, label: t }))],
+        options: issueTypes.map((t) => ({ value: t, label: t })),
       },
       {
-        kind: 'select',
         name: 'warehouse',
         label: 'Warehouse',
+        allLabel: 'All warehouses',
         value: warehouseId,
-        options: [
-          { value: '', label: 'All warehouses' },
-          ...warehouses.map((w) => ({ value: w.id, label: w.name })),
-        ],
+        options: warehouses.map((w) => ({ value: w.id, label: w.name })),
       },
       {
-        kind: 'select',
         name: 'action',
         label: 'Action status',
+        allLabel: 'All action statuses',
         value: actionStatus,
-        options: [
-          { value: '', label: 'All action statuses' },
-          ...actionStatuses.map((s) => ({ value: s, label: s })),
-        ],
+        options: actionStatuses.map((st) => ({ value: st, label: st })),
       },
     ],
   });
@@ -1310,31 +1333,25 @@ export function renderTransfersPage({
     showReset: Boolean(status || fromWarehouseId || toWarehouseId),
     controls: [
       {
-        kind: 'select',
         name: 'status',
         label: 'Status',
+        allLabel: 'All statuses',
         value: status,
-        options: [{ value: '', label: 'All statuses' }, ...statuses.map((s) => ({ value: s, label: s }))],
+        options: statuses.map((st) => ({ value: st, label: st })),
       },
       {
-        kind: 'select',
         name: 'from',
         label: 'Warehouse from',
+        allLabel: 'All warehouses',
         value: fromWarehouseId,
-        options: [
-          { value: '', label: 'All warehouses' },
-          ...warehouses.map((w) => ({ value: w.id, label: w.name })),
-        ],
+        options: warehouses.map((w) => ({ value: w.id, label: w.name })),
       },
       {
-        kind: 'select',
         name: 'to',
         label: 'Warehouse to',
+        allLabel: 'All warehouses',
         value: toWarehouseId,
-        options: [
-          { value: '', label: 'All warehouses' },
-          ...warehouses.map((w) => ({ value: w.id, label: w.name })),
-        ],
+        options: warehouses.map((w) => ({ value: w.id, label: w.name })),
       },
     ],
   });
@@ -1398,24 +1415,20 @@ export function renderAuditPage({
     showReset: Boolean(warehouseId || differencesOnly),
     controls: [
       {
-        kind: 'select',
         name: 'warehouse',
         label: 'Warehouse',
+        allLabel: 'All warehouses',
         value: warehouseId,
-        options: [
-          { value: '', label: 'All warehouses' },
-          ...warehouses.map((w) => ({ value: w.id, label: w.name })),
-        ],
+        options: warehouses.map((w) => ({ value: w.id, label: w.name })),
       },
       {
-        kind: 'select',
+        // Every line, or only the ones where the count and the system disagree.
+        // Two outcomes, so one dropdown with All and the one narrowing it does.
         name: 'difference',
         label: 'Show',
+        allLabel: 'All lines',
         value: differencesOnly ? 'yes' : '',
-        options: [
-          { value: '', label: 'All lines' },
-          { value: 'yes', label: 'Discrepancies only' },
-        ],
+        options: [{ value: 'yes', label: 'Discrepancies only' }],
       },
     ],
   });
@@ -1606,16 +1619,16 @@ export function renderProductDeletePage({ product, references, flash = null }) {
     lede: 'This cannot be undone within the running session.',
     flash,
     warning: referenced
-      ? `${product.sku} is still referenced by ${references.stockLines.length} stock line(s), ${references.transfers.length} transfer(s) and ${references.auditCounts.length} audit record(s). Deleting the product on its own would leave those pointing at a SKU that no longer exists, so they have to go with it.`
+      ? `${product.sku} is still referenced by ${references.stockLines} stock line(s), ${references.transfers} transfer(s) and ${references.auditCounts} audit record(s). Deleting the product on its own would leave those pointing at a SKU that no longer exists, so they have to go with it.`
       : 'Nothing else in the system points at this product, so it can be removed on its own.',
     rows: [
       { label: 'SKU', text: product.sku },
       { label: 'Product name', text: product.name },
       { label: 'Category', text: product.category },
       { label: 'Supplier', text: product.supplier },
-      { label: 'Stock lines affected', text: String(references.stockLines.length) },
-      { label: 'Transfers affected', text: String(references.transfers.length) },
-      { label: 'Audit records affected', text: String(references.auditCounts.length) },
+      { label: 'Stock lines affected', text: String(references.stockLines) },
+      { label: 'Transfers affected', text: String(references.transfers) },
+      { label: 'Audit records affected', text: String(references.auditCounts) },
     ],
     action: '/products/delete',
     hidden: { sku: product.sku },

@@ -3,9 +3,13 @@
 How the MVP is run, how the dummy data is put together, and how each inventory
 problem is detected.
 
-The system is a demonstration. There is no database, no live inventory source
-and no external API: everything on screen is invented and is loaded from files
-in `inventory/data/` when the server starts.
+There is no live inventory source and no external API. The application reads and
+writes PostgreSQL, in a schema of its own called `inventory_control`, and what
+is on screen is whatever that schema holds. The application never seeds it.
+
+`inventory/fixture/` is the **test** fixture. It is loaded only into the
+separate `inventory_control_test` schema, and `inventory/fixture/load.js`
+refuses to delete or seed anything when `DB_SCHEMA` is `inventory_control`.
 
 ## Running it
 
@@ -29,9 +33,14 @@ INVENTORY_PORT=4000 npm start
 npm test
 ```
 
-Node's built-in test runner, so again there is nothing to install. The tests
-cover the detection rules, the derived reports, the dummy data itself, the
-rendering and every route.
+Node's built-in test runner. The tests cover the detection rules, the derived
+reports, the seed dataset, the rendering and every route.
+
+Most of them run against the database, reseeding `inventory_control` before each
+case, which is why the npm script passes `--test-concurrency=1`. `node --test`
+on its own runs test *files* in parallel; against one shared database they would
+reseed on top of each other and fail for reasons that have nothing to do with
+the code. A run leaves the schema holding the seeded dataset.
 
 ## How the code is laid out
 
@@ -40,8 +49,10 @@ changed in one place.
 
 | File | Responsibility |
 | --- | --- |
-| `inventory/data/` | The dummy dataset. No logic. Seeds the session at startup. |
-| `inventory/store.js` | The only place data changes. Validation and the add/edit/delete operations. No HTML, no rules. |
+| `inventory/db.js` | The PostgreSQL pool, and the only place a connection is made. |
+| `inventory/fixture/` | Test fixture only. Loaded into the test schema, never into `inventory_control`. |
+| `inventory/fixture/load.js` | Loads that dataset into `inventory_control`. |
+| `inventory/store.js` | The only place data is read or written. Validation and the SQL. No HTML, no rules. |
 | `inventory/rules.js` | The six detection rules and the stock health bands. No HTML. |
 | `inventory/reports.js` | Derived views: dashboard figures, audit differences, per-screen rows. |
 | `inventory/render.js` | HTML only. No data access, no rules. |
@@ -87,7 +98,7 @@ ever accepted from a form.
 
 ## How the dummy data is structured
 
-### Products - `inventory/data/products.js`
+### Products - `inventory/fixture/products.js`
 
 14 products.
 
@@ -102,11 +113,11 @@ ever accepted from a form.
 | `unitsSoldLast90Days` | Movement figure. Stands in for a sales history the MVP does not have. |
 | `approvedWarehouses` | The sites this SKU is meant to be held at. |
 
-### Warehouses - `inventory/data/warehouses.js`
+### Warehouses - `inventory/fixture/warehouses.js`
 
 4 warehouses, each with an identifier, a name and a location.
 
-### Warehouse stock - `inventory/data/stock.js`
+### Warehouse stock - `inventory/fixture/stock.js`
 
 32 stock lines. One line is one SKU at one warehouse.
 
@@ -124,7 +135,7 @@ available = onHand - reserved
 
 so the figure on screen can never drift from the figures it comes from.
 
-### Transfers - `inventory/data/transfers.js`
+### Transfers - `inventory/fixture/transfers.js`
 
 8 transfers, each with an id, SKU, source, destination, quantity, status and the
 date it was raised. Statuses are `Pending`, `In Transit` and `Received`, and all
@@ -133,7 +144,7 @@ three appear in the data.
 Transfers are a record only: the quantities are deliberately not applied to the
 stock lines.
 
-### Inventory audit - `inventory/data/audit.js`
+### Inventory audit - `inventory/fixture/audit.js`
 
 10 physical counts. Each holds the `systemQuantity` believed at the time of the
 count and the `countedQuantity` actually found.
@@ -222,11 +233,43 @@ confirmation, and a `POST` with the write. A write that succeeds answers with a
 redirect, so refreshing afterwards cannot repeat it. A write that fails answers
 with the form again, the values still in it and the reason against the field.
 
-### Changes last for the session, not beyond it
+### Changes persist
 
-There is still no database. The arrays in `inventory/data/` are the seed;
-`store.js` edits them in place while the server runs; a restart puts everything
-back exactly as it was. Nothing is written to disk.
+Data lives in PostgreSQL, in a schema of its own called `inventory_control`.
+A record added through the screens is still there after a restart.
+
+The application reads and writes **only** that schema. Every statement in
+`store.js` and `fixture/load.js` names it explicitly, so the other applications sharing
+the database are never read from or written to.
+
+Seven tables, created by `sql/001-inventory-control-schema.sql`:
+
+| Table | Holds |
+| --- | --- |
+| `products` | SKU, name, category, supplier, active flag, units sold, optional image path |
+| `warehouses` | Warehouse id, name, location |
+| `product_warehouses` | Which sites a SKU may be held at - drives Warehouse/SKU Mismatch |
+| `stock_lines` | On hand, reserved and minimum, one row per SKU per warehouse |
+| `transfers` | Id, SKU, source, destination, quantity, status, date raised |
+| `audit_counts` | Id, SKU, warehouse, system and counted quantities, date, counter |
+| `alert_actions` | What staff did about a detected issue: status, note, timestamp |
+
+**Two figures have no column, deliberately.** There is nowhere to store
+`available` or `difference`, so a saved figure can never disagree with the
+figures it comes from. Both are worked out on read.
+
+**`stock_lines` has no foreign keys, deliberately.** Three of the conditions
+the Warehouse/SKU Mismatch rule detects are broken references - a line naming a
+warehouse that does not exist, a SKU not in the catalogue, or a SKU held at a
+site it is not approved for. A foreign key would make the first two impossible
+to record, which would not fix the problem; it would remove the system's ability
+to report it. Everywhere a broken reference is not a detectable condition -
+`product_warehouses`, `transfers`, `audit_counts` - real foreign keys are used.
+
+`inventory/fixture/` is the test fixture, not the live data. `npm run seed:test`
+loads it into `inventory_control_test`, replacing whatever is in that schema's
+seven tables. It cannot be loaded into `inventory_control`: `load.js` checks the
+schema name and throws before issuing a statement. Nothing else is touched.
 
 ### Alerts are the exception, deliberately
 

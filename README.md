@@ -26,16 +26,44 @@ The system will eventually cover:
 | Transfers | Stock moving between locations |
 | Inventory Audit | Counting stock and reconciling what is found against what is expected |
 
-All six areas are built and run against the dummy data.
+All six areas read and write PostgreSQL. The application serves the
+`inventory_control` schema in `varmen_db` and never seeds it: what is on
+screen is whatever is in that schema.
 
 ## Running it
 
-Node 20 or newer. There are no dependencies to install.
+Node 20 or newer, and a PostgreSQL database.
 
 ```
-npm start     # http://localhost:3000/
-npm test      # the test suite
+npm install                                  # one dependency: pg
+cp inventory/.env.example inventory/.env     # then fill it in
+psql "<connection>" -f sql/001-inventory-control-schema.sql
+npm start                                    # http://localhost:3000/
+npm test                                     # the test suite
 ```
+
+There is no seed step for the application. `inventory_control` holds the real
+stock data, and nothing in the running application writes demonstration data
+into it.
+
+`inventory/.env` holds the connection and is git-ignored. `.env.example` is the
+template and holds no real values.
+
+## Tests and the production schema
+
+The suite empties and reseeds every table it touches on each test case, so it is
+kept away from the production schema by two independent measures:
+
+1. `npm test` loads `inventory/test.env`, which sets `DB_SCHEMA=inventory_control_test`.
+   The schema is created and seeded automatically by the pretest step. Connection
+   details still come from `inventory/.env`, so the password lives in one file only.
+2. `inventory/fixture/load.js` refuses outright to delete or seed when `DB_SCHEMA`
+   is `inventory_control`, whatever the configuration says. A shell variable that
+   overrides `test.env` does not get past it - the run fails with a clear message
+   and writes nothing.
+
+So the fixture can only ever reach the test schema, and `npm run seed:test` is
+the only way to load it.
 
 `documentation/smart-inventory-control-mvp.md` covers the dummy data structure,
 the detection rules and each of the six areas in detail.
@@ -49,18 +77,22 @@ changes, so the filters need no Apply button.
 
 | Path | Responsibility |
 | --- | --- |
-| `inventory/data/` | The dummy dataset. No logic. Seeds the session at startup. |
-| `inventory/store.js` | The only place data changes: validation and the add/edit/delete operations. |
+| `inventory/db.js` | The PostgreSQL pool, and the only place a connection is made. |
+| `inventory/fixture/` | Test fixture only. Never loaded by the application, and never written to `inventory_control`. |
+| `inventory/fixture/load.js` | Loads the fixture into the **test** schema. Refuses to run against `inventory_control`. |
+| `inventory/fixture/ensure-test-schema.js` | Creates and seeds `inventory_control_test` before the suite runs. |
+| `inventory/store.js` | The only place data is read or written: validation and the SQL. |
 | `inventory/rules.js` | The six detection rules and the stock health bands. |
 | `inventory/reports.js` | Derived views: dashboard figures, audit differences, per-screen rows. |
 | `inventory/render.js` | HTML only. |
 | `inventory/router.js` | Path and query to a response, and form posts to a write. Pure, so both are testable without a server. |
 | `inventory/server.js` | The HTTP shell. |
 
-Records can be added, edited and deleted through the screens. There is still no
-database: the dummy arrays are the seed, changes live in memory for the life of
-the server, and a restart puts everything back. Available stock and the audit
-difference are always calculated, never entered.
+Records are added, edited and deleted through the screens and persist in
+PostgreSQL - restarting the server changes nothing. The application reads and
+writes one schema, `inventory_control`, and never touches any other schema in
+the database. Available stock and the audit difference have no columns at all:
+both are always calculated, never stored and never entered.
 
 ## Standard folders
 

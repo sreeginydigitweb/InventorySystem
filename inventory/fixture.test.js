@@ -10,18 +10,23 @@
  * Run with: npm test
  */
 
-import { test, describe } from 'node:test';
+import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { WAREHOUSES, findWarehouse, warehouseName } from './data/warehouses.js';
-import { CATEGORIES, PRODUCTS, SUPPLIERS, findProduct, productName } from './data/products.js';
-import { STOCK_LINES } from './data/stock.js';
-import { TRANSFERS, TRANSFER_STATUSES } from './data/transfers.js';
-import { AUDIT_COUNTS } from './data/audit.js';
-import { isInactiveListing, isSlowMoving, stockStatus, STOCK_STATUS } from './rules.js';
-import { findStockLine, resetStore, updateStockLine } from './store.js';
+import { WAREHOUSES, findWarehouse, warehouseName } from './fixture/warehouses.js';
+import { CATEGORIES, PRODUCTS, SUPPLIERS, findProduct, productName } from './fixture/products.js';
+import { STOCK_LINES } from './fixture/stock.js';
+import { TRANSFERS, TRANSFER_STATUSES } from './fixture/transfers.js';
+import { AUDIT_COUNTS } from './fixture/audit.js';
+import { isInactiveListing, isSlowMoving, makeCatalogue, stockStatus, STOCK_STATUS } from './rules.js';
+import { findStockLine, updateStockLine } from './store.js';
+import { closePool } from './db.js';
+import { resetToFixture } from './fixture/load.js';
 
 const warehouseIds = WAREHOUSES.map((warehouse) => warehouse.id);
+
+/** The seed catalogue the rules are judged against in this file. */
+const catalogue = makeCatalogue(PRODUCTS, WAREHOUSES);
 const skus = PRODUCTS.map((product) => product.sku);
 
 describe('warehouses', () => {
@@ -160,11 +165,11 @@ describe('the dummy data demonstrates every required condition', () => {
   });
 
   test('an inactive listing still holding stock', () => {
-    assert.ok(STOCK_LINES.some((line) => isInactiveListing(line)));
+    assert.ok(STOCK_LINES.some((line) => isInactiveListing(line, catalogue)));
   });
 
   test('slow-moving stock', () => {
-    assert.ok(STOCK_LINES.some((line) => isSlowMoving(line)));
+    assert.ok(STOCK_LINES.some((line) => isSlowMoving(line, catalogue)));
   });
 
   test('an over-reserved line, so available can be seen going below zero', () => {
@@ -242,16 +247,18 @@ describe('audit counts', () => {
   });
 });
 
-describe('the records are immutable', () => {
+describe('the seed records are immutable, and the database is the live copy', () => {
+  before(resetToFixture);
+  after(closePool);
+
   /*
-   * The collections themselves are no longer frozen: they are the session, and
-   * store.js edits them in place when staff add, edit or delete. The guarantee
-   * that mattered has not gone anywhere, though, and is asserted here in the
-   * stronger form the store now provides - a record that a screen is already
-   * holding can never change underneath it, because an edit swaps in a new
-   * frozen record rather than writing into the old one.
+   * ./data is now the SEED, not the live data: it is loaded into
+   * inventory_control once and the database is what the screens read after
+   * that. These records stay frozen so the seed cannot be edited by accident,
+   * and the second case shows the separation directly - writing through the
+   * store changes the database and leaves the seed exactly as it was.
    */
-  test('a record cannot be altered in place', () => {
+  test('a seed record cannot be altered in place', () => {
     assert.throws(() => {
       PRODUCTS[0].name = 'changed';
     });
@@ -266,23 +273,26 @@ describe('the records are immutable', () => {
     });
   });
 
-  test('an edit replaces the record, leaving the one already read alone', () => {
-    const held = findStockLine('SIC-1001', 'WH-BIR');
-    const before = held.onHand;
+  test('a write goes to the database and leaves the seed untouched', async () => {
+    const seeded = STOCK_LINES.find(
+      (line) => line.sku === 'SIC-1001' && line.warehouseId === 'WH-BIR',
+    );
+    const before = seeded.onHand;
 
-    const result = updateStockLine('SIC-1001', 'WH-BIR', {
+    const result = await updateStockLine('SIC-1001', 'WH-BIR', {
       sku: 'SIC-1001',
       warehouseId: 'WH-BIR',
       onHand: before + 5,
-      reserved: held.reserved,
-      minimum: held.minimum,
+      reserved: seeded.reserved,
+      minimum: seeded.minimum,
     });
 
     assert.equal(result.ok, true);
-    assert.equal(held.onHand, before, 'the record a screen already held changed underneath it');
-    assert.equal(findStockLine('SIC-1001', 'WH-BIR').onHand, before + 5);
+    assert.equal((await findStockLine('SIC-1001', 'WH-BIR')).onHand, before + 5);
+    assert.equal(seeded.onHand, before, 'the seed changed when the database was written');
 
-    resetStore();
-    assert.equal(findStockLine('SIC-1001', 'WH-BIR').onHand, before);
+    await resetToFixture();
+    assert.equal((await findStockLine('SIC-1001', 'WH-BIR')).onHand, before);
   });
 });
+
