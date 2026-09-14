@@ -15,6 +15,7 @@ import {
   formatDifference,
   issueClass,
   layout,
+  renderFilterScript,
   renderNotFoundPage,
   renderThumbnailSvg,
   statusClass,
@@ -69,9 +70,15 @@ describe('status classes', () => {
   });
 
   test('each transfer status gets its own class', () => {
-    assert.equal(transferStatusClass('Pending'), 'warn');
-    assert.equal(transferStatusClass('In Transit'), 'info');
     assert.equal(transferStatusClass('Received'), 'ok');
+    assert.equal(transferStatusClass('Received (Adjusted)'), 'info');
+  });
+
+  test('the statuses the source cannot hold are no longer dressed up', () => {
+    // Pending and In Transit used to have their own colours, which made a
+    // workflow ledsone has no trace of look like a real one.
+    assert.equal(transferStatusClass('Pending'), 'neutral');
+    assert.equal(transferStatusClass('In Transit'), 'neutral');
   });
 
   test('an unrecognised value falls back to neutral rather than breaking the page', () => {
@@ -140,6 +147,51 @@ describe('renderNotFoundPage', () => {
     const page = renderNotFoundPage();
     assert.match(page, /does not exist/);
     assert.ok(page.includes('href="/products"'));
+  });
+});
+
+describe('renderFilterScript', () => {
+  const script = renderFilterScript();
+
+  /** The script with its comments taken out, so prose cannot pass for code. */
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+
+  test('never disables a control', () => {
+    // THE BUG. The script used to set disabled = true on every field still
+    // sitting at "All" before submitting, to keep the URL clean. That mutation
+    // was applied to the live page and never reverted, so choosing Status
+    // greyed out Warehouse from, Warehouse to and the search box - and the
+    // browser's back-forward cache restored them still disabled.
+    assert.equal(/\.disabled\s*=/.test(code), false, 'the script still disables controls');
+    assert.equal(code.includes('disabled'), false);
+  });
+
+  test('does not touch the options in any dropdown', () => {
+    // No cascading. Every filter keeps offering every value whatever else is
+    // selected, so Status then Warehouse from then Warehouse to all combine.
+    for (const mutation of ['removeChild', 'remove()', 'innerHTML', 'options.length', 'appendChild']) {
+      assert.equal(code.includes(mutation), false, `the script still does ${mutation}`);
+    }
+  });
+
+  test('builds the URL from the non-empty fields and navigates', () => {
+    assert.match(code, /encodeURIComponent/);
+    assert.match(code, /location\.assign/);
+    assert.match(code, /field\.value === ""/);
+  });
+
+  test('carries no page number, so a changed filter starts at page one', () => {
+    assert.equal(code.includes('page'), false, 'the script would carry a page number over');
+  });
+
+  test('leaves forms that are not filter bars alone', () => {
+    assert.match(code, /classList\.contains\("filters"\)/);
+  });
+
+  test('marks the document so the Apply button can be hidden', () => {
+    // The class only lands if this file actually ran. With scripting off, or
+    // if the file fails to load, the button stays and the bar still works.
+    assert.match(code, /documentElement\.className/);
   });
 });
 

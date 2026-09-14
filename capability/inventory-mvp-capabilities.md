@@ -23,11 +23,11 @@ page is built.
 
 | Capability | What it covers |
 | --- | --- |
-| **Dashboard** | Total SKUs, Healthy Stock, Low Stock, Out-of-Stock Items, Discrepancies and Pending Transfers, plus a breakdown by issue type and by transfer status. All six cards count **catalogue SKUs**, so the four stock bands add up to Total SKUs exactly. Every card links through to the screen listing the same SKUs, showing the same figure. |
+| **Dashboard** | Total SKUs, Healthy Stock, Low Stock, Out-of-Stock Items, Discrepancies and Stock Transfers, plus a breakdown by issue type and by transfer status. The five stock cards count **catalogue SKUs**, so the four stock bands add up to Total SKUs exactly; Stock Transfers counts recorded transfer lines. Every card links through to the screen listing the same SKUs, showing the same figure. |
 | **Products** | The catalogue: SKU, image, product name, category, supplier, listing status, total units held and stock position. Search across SKU, name and supplier; filter by category, supplier and stock position. View only. |
 | **Warehouse Stock** | Stock by SKU and warehouse: current, reserved, available and health band. Search by SKU or name; filter by warehouse and band. View only; available is always derived, never stored. |
 | **Alerts / Issues** | The six detected issue types, each naming the SKU and warehouse affected and the reason it was raised. Filter by issue type and warehouse. View only. Issues are recalculated from the source on every page load and are never stored. |
-| **Transfers** | Reads transfer records from the source. `ledsone` holds none, so the screen is empty and says why. |
+| **Transfers** | Stock moved between UK units, read from the stock-change log in `inventory.product_history`. One row per SKU per movement: derived reference, SKU, product, from, to, quantity, status, date, recorded by and reason. Search across all of those; filter by status, warehouse from and warehouse to. View opens the whole movement with every SKU line and both leg quantities. View only. |
 | **Inventory Audit** | Reads physical stock counts from the source. `ledsone` holds none, so the screen is empty and says why. `Difference = Counted − System` remains the definition. |
 
 Each list screen renders at most 200 rows and says so above the table
@@ -47,6 +47,7 @@ displayed page, so a search finds a SKU wherever it sits.
 | Warehouses | `inventory.warehouse` |
 | Current, Reserved | `inventory.physical_product_stock.quantity`, `.reserved_quantity` |
 | Shelf location | `inventory.physical_product_stock.product_shelf_location`, `.product_bulk_location` |
+| Transfers | `inventory.product_history.history`, lines starting `UK stock changes: Unit…` with one leg falling and another rising. Warehouse is resolved from the `UnitN` token, never the bracketed legacy column name. Reference is derived. |
 
 A SKU with no listing, no purchase order or no sales shows **Not recorded** —
 never a blank or a zero that could be read as a figure.
@@ -106,11 +107,14 @@ Verified against `ledsone` on 2026-09-11:
 | Low Stock | 561 |
 | Out-of-Stock Items | 1,379 |
 | Discrepancies | 0 (no source data) |
-| Pending Transfers | 0 (no source data) |
 
 `4,010 + 561 + 1,379 + 560 negative = 6,510`. Every SKU falls into exactly one
-band, which is the invariant that makes the six cards comparable with each
+band, which is the invariant that makes the stock cards comparable with each
 other.
+
+The Pending Transfers card that stood here counted a status the source cannot
+hold and always read 0. It is now **Stock Transfers**, counting recorded
+transfer lines, and links to the unfiltered Transfers screen.
 
 ## There is no add, edit or delete
 
@@ -123,7 +127,7 @@ staff would believe a correction had been made.
 | Products | **View only** |
 | Warehouse Stock | **View only** |
 | Alerts / Issues | **View only**, and calculated rather than stored |
-| Transfers | **View only** (empty — the source holds no transfer records) |
+| Transfers | **View only** (read from the stock-change log) |
 | Inventory Audit | **View only** (empty — the source holds no stock-count records) |
 
 | What | Behaviour |
@@ -152,13 +156,16 @@ problem that exists in the data is listed and counted until the data changes.
 
 - **No writes to the source, ever.** No CRUD, no migration, no seed, no schema
   of its own, no second data store. This is the defining constraint.
-- **No transfer data.** `ledsone` has no inter-warehouse transfer table. The
-  nearest match by name, `listings.bandq_transfers`, is a record of category
-  spreadsheets uploaded to B&Q and is unrelated to moving stock.
+- **No transfer workflow or transfer number.** Transfers are read from the
+  stock-change log, which only records moves already applied to both sites. There
+  is no Pending or In Transit, and the reference is derived, not a business id.
+  Single-site corrections and same-direction recounts are not shown as
+  transfers. (`listings.bandq_transfers` is unrelated — it records category
+  spreadsheets uploaded to B&Q.)
 - **No audit/count data.** `ledsone` has no stock-count table.
-  `inventory.product_history` is a free-text edit log with no counted quantity,
-  no system quantity and no warehouse, so `Counted − System` cannot be derived
-  from it without inventing two of its three terms.
+  `inventory.product_history` records what a figure was changed from and to, not
+  a counted quantity against the system quantity, so `Counted − System` cannot be
+  derived from it without inventing two of its three terms.
 - **No minimum/reorder level.** See the threshold note above.
 - **Category covers 3,812 of 6,510 SKUs; supplier covers 1,628.** The rest show
   "Not recorded". Category is a marketplace merchandising field, so its 323

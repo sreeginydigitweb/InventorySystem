@@ -52,6 +52,7 @@ import {
   snapshot,
   stockReport,
   transferCounts,
+  transferGroup,
   transfersReport,
 } from './reports.js';
 import {
@@ -397,6 +398,7 @@ async function alertsRoute(query) {
 async function transfersRoute(query) {
   const data = await snapshot();
   const all = await transfersReport(data);
+  const search = param(query, 'q');
   const status = allowedValue(param(query, 'status'), TRANSFER_STATUSES);
   // Source and destination are filtered separately, so staff can ask what is
   // leaving one site, what is arriving at another, or a specific move between
@@ -404,8 +406,21 @@ async function transfersRoute(query) {
   const fromWarehouseId = allowedValue(param(query, 'from'), idsOf(data.warehouses));
   const toWarehouseId = allowedValue(param(query, 'to'), idsOf(data.warehouses));
 
+  // Searched over every movement before the page window is taken, so a SKU
+  // that moved two years ago is found from the search box rather than only by
+  // paging to it.
   const transfers = all.filter(
     (transfer) =>
+      matchesSearch(search, [
+        transfer.id,
+        transfer.sku,
+        transfer.productName,
+        transfer.fromWarehouseName,
+        transfer.toWarehouseName,
+        transfer.status,
+        transfer.note,
+        transfer.recordedBy,
+      ]) &&
       (!status || transfer.status === status) &&
       (!fromWarehouseId || transfer.fromWarehouseId === fromWarehouseId) &&
       (!toWarehouseId || transfer.toWarehouseId === toWarehouseId),
@@ -417,17 +432,15 @@ async function transfersRoute(query) {
     renderTransfersPage({
       transfers: view.rows,
       view,
-      params: { status, from: fromWarehouseId, to: toWarehouseId },
+      params: { q: search, status, from: fromWarehouseId, to: toWarehouseId },
       total: all.length,
       matched: transfers.length,
       statuses: TRANSFER_STATUSES,
       warehouses: data.warehouses,
+      search,
       status,
       fromWarehouseId,
       toWarehouseId,
-      // Printed when the screen is empty, so an empty Transfers screen reads as
-      // "the source has no transfers" rather than "this page is broken".
-      note: all.length === 0 ? SOURCE_GAPS.transfers : '',
     }),
   );
 }
@@ -545,8 +558,16 @@ async function issueViewRoute(query) {
   );
 }
 
+/**
+ * One transfer, as its header and every SKU line that moved under it.
+ *
+ * A transfer is a group of history lines sharing a derived reference, so this
+ * gathers the group rather than picking the first row carrying the id - 303 of
+ * the 776 transfers in the source moved more than one SKU, and showing only the
+ * first of them would misreport the movement.
+ */
 async function transferViewRoute(query) {
-  const transfer = (await transfersReport()).find((row) => row.id === key(query, 'id'));
+  const transfer = await transferGroup(key(query, 'id'));
   if (!transfer) return notFound();
 
   return html(renderTransferViewPage({ transfer }));

@@ -32,13 +32,16 @@
  *                       Reserved = reserved_quantity
  *                       Available is NOT a column; it is Current - Reserved,
  *                       derived on read, exactly as before.
+ *   Transfers         inventory.product_history.history - the warehouse
+ *                     stock-change entries, read as movements between two
+ *                     sites. See the Transfers section below for how, and for
+ *                     what that source can and cannot say.
  *
  * NOT IN THE SOURCE. Nothing here is invented to fill the gap; see SOURCE_GAPS
  * at the foot of this file, which the screens print so staff can see why a
  * column or a screen is empty rather than assuming the business has no data.
  *
  *   Minimum / reorder level   no such column anywhere in ledsone
- *   Transfers                 no inter-warehouse transfer table
  *   Audit / stock counts      no physical-count table
  *
  * ---------------------------------------------------------------------------
@@ -55,6 +58,8 @@
  * written back or persisted, so the cache can only ever be behind, never wrong
  * in a way a refresh will not fix.
  */
+
+import { createHash } from 'node:crypto';
 
 import {
   INVENTORY_SCHEMA,
@@ -340,35 +345,278 @@ export function stockLines() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Transfers and audit counts                                                 */
+/* Transfers                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/*
+ * WHERE THE TRANSFER DATA ACTUALLY IS
+ *
+ * ledsone has no transfer header/item table, and this file used to conclude
+ * from that that the business had no transfer records at all. That conclusion
+ * was wrong. The records exist; they are written into the free-text log in
+ * inventory.product_history.history, one line per stock-change event:
+ *
+ *   UK stock changes: Unit3(Quantity) from 121 to 226,Unit18(unit1) from 105
+ *   to 0 (all taken unit 18 in transfer informed nanthini akka) by mithusha on
+ *   2026-01-29 via inventory CSV.
+ *
+ * A line carries one to three LEGS - "UnitN(field) from OLD to NEW" - then an
+ * optional note in brackets, then who applied it and when.
+ *
+ * A line is a TRANSFER when two of its legs move in opposite directions: stock
+ * left one warehouse and arrived at another. The warehouse that went down is
+ * Warehouse From; the one that went up is Warehouse To.
+ *
+ * Everything else in that log is something other than a transfer, and is
+ * dropped here rather than shown as one:
+ *
+ *   one leg only                a stock correction at a single site
+ *   two legs, same direction    two sites recounted in one go
+ *   no readable opening figure  "from  to 50" - no delta can be worked out
+ *   Mark(unit2), Out of stock   flags, not warehouses
+ *
+ * ---------------------------------------------------------------------------
+ * THE UNIT TOKEN IS THE WAREHOUSE. THE BRACKET IS NOT.
+ *
+ * The name in brackets is the legacy column the figure used to live in, and it
+ * does NOT agree with the unit number in front of it:
+ *
+ *   Unit3(Quantity)   is UK Unit3
+ *   Unit4(unit3)      is UK Unit4  - NOT UK Unit3
+ *   Unit18(unit1)     is UK Unit18 - NOT UK Unit1
+ *
+ * Reading the bracket would silently file a third of the movements against the
+ * wrong site, so the warehouse is resolved from the UnitN token only.
+ * unitWarehouseMap() builds that mapping out of inventory.warehouse itself
+ * rather than hard-coding it.
+ *
+ * ---------------------------------------------------------------------------
+ * THERE IS NO REFERENCE NUMBER, AND THERE IS NO "PENDING"
+ *
+ * Two things the source genuinely does not have, and neither is invented:
+ *
+ *   A reference number. There is no business transfer id anywhere in ledsone,
+ *   so one is DERIVED - a stable hash of the event that produced the line, and
+ *   labelled a derived reference wherever it is shown. Rows sharing it are the
+ *   SKUs that moved together in one event, which is how one transfer comes to
+ *   carry many SKU lines.
+ *
+ *   A workflow status. Across all 10,615 transfer lines, "pending" appears
+ *   zero times, "in transit" zero times and "awaiting" zero times. Every line
+ *   records a move ALREADY applied to both warehouses, so the only honest
+ *   status is Received. Where the two legs disagree - stock moved and the
+ *   shelf recounted in the same edit - it is Received (Adjusted), and both leg
+ *   quantities are carried through so the difference is visible rather than
+ *   averaged away.
+ */
+
+/** One leg of a stock-change line: "Unit4(unit3) from 179 to 0". */
+const LEG_PATTERN = /(Unit\d+)\(([^)]*)\)\s+from\s+(-?\d*)\s+to\s+(-?\d+)/g;
+
+/** The trailing "by <user> on <date>" every applied change carries. */
+const APPLIED_PATTERN = /\bby\s+([A-Za-z0-9_.@-]+)\s+on\s+(\d{4}-\d{2}-\d{2})/g;
+
+/** The note in brackets, immediately before "by <user>". */
+const NOTE_PATTERN = /\(([^()]*)\)\s*by\s/;
+
+/** A movement whose two legs agree on the quantity. */
+export const TRANSFER_RECEIVED = 'Received';
+
+/** A movement recorded alongside a recount, so the two legs disagree. */
+export const TRANSFER_RECEIVED_ADJUSTED = 'Received (Adjusted)';
+
 /**
- * Inter-warehouse transfers.
+ * Map a "UnitN" token to a warehouse id, using the warehouse list itself.
  *
- * ledsone has no transfer table. Every schema was searched for one: the nearest
- * match by name, listings.bandq_transfers, is a record of category spreadsheets
- * uploaded to B&Q and has nothing to do with moving stock between sites.
+ * Only UK sites are considered: the log line says "UK stock changes", and no
+ * other warehouse in the source carries a unit number, so there is nothing for
+ * a French or German site to be confused with.
  *
- * So this returns nothing, and the Transfers screen says why. It does not
- * return invented rows, and there is nowhere for staff to create one, because a
- * transfer created here would be a record the business does not have.
+ * @param {readonly {id: string, name: string, location: string}[]} warehouseList
+ * @returns {Map<string, string>} "Unit3" -> warehouse id.
+ */
+export function unitWarehouseMap(warehouseList) {
+  const map = new Map();
+
+  for (const warehouse of warehouseList) {
+    if (String(warehouse.location ?? '').trim().toUpperCase() !== 'UK') continue;
+
+    const match = /unit\s*(\d+)\b/i.exec(String(warehouse.name ?? ''));
+    if (match) map.set(`Unit${match[1]}`, warehouse.id);
+  }
+
+  return map;
+}
+
+/**
+ * A stable derived reference for the event a movement belongs to.
+ *
+ * Derived, not read: ledsone has no transfer reference. The same event always
+ * produces the same reference, so a link to a transfer keeps working between
+ * reads, and the SKUs that moved together share one.
+ *
+ * @param {{raisedOn: string, recordedBy: string, note: string,
+ *          fromWarehouseId: string, toWarehouseId: string}} event
+ * @returns {string}
+ */
+export function transferReference(event) {
+  const material = [
+    event.raisedOn,
+    event.recordedBy,
+    event.note,
+    event.fromWarehouseId,
+    event.toWarehouseId,
+  ].join(' ');
+
+  return `TR-${createHash('sha1').update(material).digest('hex').slice(0, 10).toUpperCase()}`;
+}
+
+/**
+ * Read one history line, and say what movement it describes - if any.
+ *
+ * Exported so the extraction can be exercised against real line text without
+ * opening a connection to the source.
+ *
+ * @param {string} text                One line of product_history.history.
+ * @param {Map<string, string>} units  From unitWarehouseMap().
+ * @returns {object|null} The movement, or null when the line is not a transfer.
+ */
+export function parseTransferLine(text, units) {
+  const line = String(text ?? '');
+
+  const legs = [];
+  LEG_PATTERN.lastIndex = 0;
+  for (let match = LEG_PATTERN.exec(line); match; match = LEG_PATTERN.exec(line)) {
+    // An opening figure that is not there - "from  to 50" - makes the delta
+    // unknowable. The whole line goes rather than half of it: the leg that
+    // could not be read may be the one that balances the move.
+    if (match[3] === '') return null;
+    legs.push({ unit: match[1], delta: Number(match[4]) - Number(match[3]) });
+  }
+
+  // One leg is a correction at a single site, not a move between two.
+  if (legs.length < 2) return null;
+
+  // The biggest fall is where the stock left; the biggest rise is where it
+  // arrived. On a three-leg line the third is a negative being zeroed out and
+  // is not part of the move.
+  let out = null;
+  let into = null;
+  for (const leg of legs) {
+    if (leg.delta < 0 && (out === null || leg.delta < out.delta)) out = leg;
+    if (leg.delta > 0 && (into === null || leg.delta > into.delta)) into = leg;
+  }
+
+  // Both sites moved the same way: two recounts in one edit, not a transfer.
+  if (out === null || into === null) return null;
+
+  APPLIED_PATTERN.lastIndex = 0;
+  let applied = null;
+  for (let match = APPLIED_PATTERN.exec(line); match; match = APPLIED_PATTERN.exec(line)) {
+    applied = match;
+  }
+  if (applied === null) return null;
+
+  const quantityOut = Math.abs(out.delta);
+  const quantityIn = into.delta;
+
+  return {
+    // An unmapped unit keeps its token as its identifier rather than being
+    // dropped. Unit5 appears in the log and has no row in inventory.warehouse;
+    // those movements are still real, and are shown under the name the log
+    // gave them rather than deleted for being inconvenient.
+    fromWarehouseId: units.get(out.unit) ?? out.unit,
+    toWarehouseId: units.get(into.unit) ?? into.unit,
+    // The conservative figure. Where the legs disagree, the smaller of the two
+    // is the most that can honestly be called moved; the rest was a recount.
+    quantity: Math.min(quantityOut, quantityIn),
+    quantityOut,
+    quantityIn,
+    status: quantityOut === quantityIn ? TRANSFER_RECEIVED : TRANSFER_RECEIVED_ADJUSTED,
+    raisedOn: applied[2],
+    recordedBy: applied[1],
+    note: (NOTE_PATTERN.exec(line)?.[1] ?? '').trim(),
+  };
+}
+
+/**
+ * Turn the matching history lines into transfer rows.
+ *
+ * One row per SKU per movement, which is the grain the screen lists and the
+ * filters narrow. Rows produced by one event share a derived reference, and the
+ * transfer detail page gathers them back up by it.
+ *
+ * @param {readonly {sku: string, line: string}[]} lines
+ * @param {readonly object[]} warehouseList
+ * @returns {object[]}
+ */
+export function extractTransfers(lines, warehouseList) {
+  const units = unitWarehouseMap(warehouseList);
+  const found = [];
+
+  for (const row of lines) {
+    const movement = parseTransferLine(row.line, units);
+    if (movement === null) continue;
+
+    found.push(
+      Object.freeze({
+        id: transferReference(movement),
+        sku: row.sku,
+        ...movement,
+      }),
+    );
+  }
+
+  // Most recent first, then grouped by reference, so the newest movements are
+  // on the first page and a transfer's SKU lines sit together.
+  return found.sort(
+    (a, b) =>
+      b.raisedOn.localeCompare(a.raisedOn) ||
+      a.id.localeCompare(b.id) ||
+      a.sku.localeCompare(b.sku),
+  );
+}
+
+/**
+ * Every warehouse-to-warehouse movement the source records.
+ *
+ * The line splitting and the "is this a transfer line at all" test happen in
+ * the database, so what comes back is the ten thousand candidate lines rather
+ * than the whole log. Deciding which of those is actually a transfer happens in
+ * parseTransferLine() above, where it can be read and tested.
  *
  * @returns {Promise<object[]>}
  */
-export async function transfers() {
-  return [];
+export function transfers() {
+  return cached('transfers', async () =>
+    extractTransfers(
+      await rows(`
+        SELECT p.sku,
+               trim(l) AS line
+          FROM ${INVENTORY_SCHEMA}.product_history h
+          JOIN ${INVENTORY_SCHEMA}.products p
+            ON p.id = h.inventory_id AND p.inventory_bool
+         CROSS JOIN LATERAL regexp_split_to_table(coalesce(h.history, ''), E'[\\r\\n]+') l
+         WHERE trim(l) LIKE 'UK stock changes: Unit%'`),
+      await warehouses(),
+    ),
+  );
 }
+
+/* -------------------------------------------------------------------------- */
+/* Audit counts                                                               */
+/* -------------------------------------------------------------------------- */
 
 /**
  * Physical stock counts.
  *
- * ledsone has no stock-count table. inventory.product_history is the closest
- * thing and is a free-text log of edits ("Quantity changed from 0 to 400"), not
- * a counted-against-system record: it has no counted quantity, no system
- * quantity at the time of counting, and no warehouse, so the difference the
- * audit screen exists to show - Counted - System - cannot be derived from it
- * without inventing two of its three terms.
+ * ledsone has no stock-count table, and inventory.product_history is NOT one.
+ * That log is where the transfers above come from, and it answers a different
+ * question: it records what a stock figure was changed FROM and TO, by whom.
+ * An audit line needs what was counted on the shelf against what the system
+ * believed at the moment of counting - two figures the log does not hold and
+ * which cannot be recovered from it. Reusing it here would mean inventing two
+ * of the three terms in Counted - System, so it is not reused here.
  *
  * @returns {Promise<object[]>}
  */
@@ -391,9 +639,6 @@ export const SOURCE_GAPS = Object.freeze({
   minimum:
     'ledsone holds no minimum or reorder level for a SKU, so Low Stock is ' +
     'flagged against a single application-wide threshold instead.',
-  transfers:
-    'ledsone holds no inter-warehouse transfer records, so there is nothing ' +
-    'to show here. This screen reads the source; it does not create transfers.',
   audit:
     'ledsone holds no physical stock counts, so there is nothing to compare ' +
     'against the system figure. This screen reads the source; it does not ' +

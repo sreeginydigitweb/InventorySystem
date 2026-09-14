@@ -84,14 +84,27 @@ export function memorySource(data = {}) {
 /* -------------------------------------------------------------------------- */
 
 /**
- * The three transfer statuses, in the order work moves through them.
+ * The transfer statuses a movement in this source can actually hold.
  *
- * Declared rather than derived: the Transfers screen's filter must offer all
- * three, and the dashboard's summary must list all three with a count, whether
- * or not the source currently holds a transfer at each - or, as today, any
- * transfer at all.
+ * This list used to be Pending / In Transit / Received - a workflow the source
+ * has no trace of. Every transfer record in ledsone is a stock change that has
+ * ALREADY been applied to both warehouses: searching the whole log finds
+ * "pending" zero times, "in transit" zero times and "awaiting" zero times.
+ * Offering those two as filters meant two of the three dropdown options could
+ * only ever return an empty screen.
+ *
+ * So the list is now what the source can say, and the difference between the
+ * two is real and readable off the record itself:
+ *
+ *   Received             the two legs agree - the quantity that left one site
+ *                        is the quantity that arrived at the other
+ *   Received (Adjusted)  the legs disagree, because the shelf was recounted in
+ *                        the same edit. Both leg figures are kept on the row,
+ *                        so the discrepancy is shown rather than smoothed over
+ *
+ * @see source.js TRANSFER_RECEIVED, TRANSFER_RECEIVED_ADJUSTED
  */
-export const TRANSFER_STATUSES = Object.freeze(['Pending', 'In Transit', 'Received']);
+export const TRANSFER_STATUSES = Object.freeze(['Received', 'Received (Adjusted)']);
 
 /**
  * Categories to offer in the Products filter.

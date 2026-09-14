@@ -150,12 +150,13 @@ export function issueClass(type) {
  */
 export function transferStatusClass(status) {
   switch (status) {
-    case 'Pending':
-      return 'warn';
-    case 'In Transit':
-      return 'info';
     case 'Received':
       return 'ok';
+    // The move happened and the shelf was recounted in the same edit, so the
+    // two legs disagree. Not a fault, but not a clean movement either - it
+    // reads as the qualified thing it is rather than as a plain Received.
+    case 'Received (Adjusted)':
+      return 'info';
     default:
       return 'neutral';
   }
@@ -299,6 +300,13 @@ const STYLES = `
   }
   button:hover { background: #245a94; }
   button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  /* The filter bar's no-JavaScript submit. /filters.js applies a filter the
+     moment it changes and marks the root element, so with scripting on the
+     button is not needed and is taken out of the layout. With scripting off -
+     or if that file fails to load - the class never arrives and the button
+     stays, which is the only way the dropdowns can be applied at all. */
+  .filters .apply { align-self: center; }
+  .js .filters .apply { display: none; }
   a.reset { font-size: .85rem; color: var(--accent); align-self: center; }
 
   /* Tables. The container scrolls sideways so the page itself never has to. */
@@ -596,6 +604,16 @@ ${banner}${body}
  * what is on screen can always be read off the dropdowns without opening
  * anything.
  *
+ * Every group always offers every value the data set holds. Choosing one never
+ * removes, disables or rebuilds the options in another: the whole point of a
+ * bar of filters is that Status, Warehouse from, Warehouse to and Search can be
+ * set one after another and narrow together.
+ *
+ * The Apply button is the no-JavaScript path. /filters.js navigates the moment
+ * a control changes and hides the button by putting `js` on the root element -
+ * so with scripting on it is not in the way, and with scripting off, or when
+ * that file fails to load, it is a plain submit button and the bar still works.
+ *
  * "All" is the first option of every group and its value is the empty string.
  * Choosing it is how a filter is removed, and because /filters.js drops empty
  * fields before submitting, the URL - ?category=Bulbs&supplier=Halden... -
@@ -648,6 +666,7 @@ function renderFilters({ action, controls, showReset }) {
 
   return `    <form class="filters" method="get" action="${escapeHtml(action)}">
       ${fields}
+      <button type="submit" class="apply">Apply</button>
       ${reset}
     </form>`;
 }
@@ -968,7 +987,10 @@ export function renderDashboardPage({ metrics, issueCounts, transferCounts }) {
     // ?show=discrepancy is what the audit screen's Show filter reads, so the
     // card lands with that dropdown already set to Discrepancies only.
     tile('/audit?show=discrepancy', metrics.discrepancies, 'Discrepancies', 'audit lines that disagree', 'bad'),
-    tile('/transfers?status=Pending', metrics.pendingTransfers, 'Pending Transfers', 'awaiting despatch', 'warn'),
+    // Was "Pending Transfers", counting a status the source cannot hold, so
+    // the card read 0 for ever and its link landed on an empty screen. It now
+    // counts the movements actually recorded and opens exactly those rows.
+    tile('/transfers', metrics.stockTransfers, 'Stock Transfers', 'recorded movements', ''),
   ].join('\n');
 
   /*
@@ -1321,6 +1343,19 @@ ${pager('/alerts', params, view)}`;
 /* 5. TRANSFERS                                                               */
 /* ========================================================================== */
 
+/**
+ * Stock that moved between two warehouses.
+ *
+ * One row per SKU per movement, which is the grain the source records and the
+ * grain a search for a SKU has to find. The Reference column is the derived
+ * identifier the SKUs that moved together share - ledsone has no transfer
+ * number - and the View icon opens that whole movement, every line of it.
+ *
+ * Recorded by and Reason are shown on the row rather than hidden behind View:
+ * they are the only account of WHY a movement happened, they are what the
+ * search box searches, and on a screen of near-identical Unit4 to Unit3 moves
+ * they are what tells one row from another.
+ */
 export function renderTransfersPage({
   transfers,
   view,
@@ -1329,10 +1364,10 @@ export function renderTransfersPage({
   matched,
   statuses,
   warehouses,
+  search = '',
   status = '',
   fromWarehouseId = '',
   toWarehouseId = '',
-  note = '',
   flash = null,
 }) {
   const rows = transfers
@@ -1346,18 +1381,27 @@ export function renderTransfersPage({
             <td class="num">${escapeHtml(number(transfer.quantity))}</td>
             <td><span class="pill ${escapeHtml(transferStatusClass(transfer.status))}">${escapeHtml(transfer.status)}</span></td>
             <td class="muted">${escapeHtml(transfer.raisedOn)}</td>
+            <td>${escapeHtml(transfer.recordedBy)}</td>
+            <td class="name">${escapeHtml(transfer.note)}</td>
             ${rowActions([{ label: 'View', href: href('/transfers/view', { id: transfer.id }) }])}
           </tr>`,
     )
     .join('\n');
 
   const head =
-    '<th>Transfer ID</th><th>SKU</th><th>Product</th><th>From</th><th>To</th><th class="num">Qty</th><th>Status</th><th>Raised</th><th class="row-actions">Action</th>';
+    '<th>Reference</th><th>SKU</th><th>Product</th><th>From</th><th>To</th><th class="num">Qty</th><th>Status</th><th>Date</th><th>Recorded by</th><th>Reason</th><th class="row-actions">Action</th>';
 
   const filters = renderFilters({
     action: '/transfers',
-    showReset: Boolean(status || fromWarehouseId || toWarehouseId),
+    showReset: Boolean(search || status || fromWarehouseId || toWarehouseId),
     controls: [
+      {
+        kind: 'search',
+        name: 'q',
+        label: 'Search',
+        value: search,
+        placeholder: 'Reference, SKU, product, warehouse, reason or user',
+      },
       {
         name: 'status',
         label: 'Status',
@@ -1385,14 +1429,13 @@ export function renderTransfersPage({
   const body = `${filters}
 ${countLine(view, matched, total, 'transfer')}
 ${pager('/transfers', params, view)}
-${sourceNote(note)}
-${tableOrEmpty(rows, head, 'No transfers match these filters.')}
+${tableOrEmpty(rows, head, noMatches('transfers', search))}
 ${pager('/transfers', params, view)}`;
 
   return layout({
     title: 'Transfers',
     activePath: '/transfers',
-    lede: 'Stock moving between warehouses.',
+    lede: 'Stock that has moved between warehouses, read from the source stock-change record.',
     body,
     flash,
   });
@@ -1692,33 +1735,82 @@ export function renderIssueViewPage({ issue, line, flash = null }) {
 /* --- Transfers ------------------------------------------------------------ */
 
 /**
- * One transfer.
+ * One transfer: what moved, from where to where, and every SKU line under it.
+ *
+ * The header figures are the whole movement summed; the table below is the
+ * lines it is made of. 303 of the 776 transfers in the source moved more than
+ * one SKU in a single edit, so the lines are the record and the header is the
+ * summary of them - not the other way round.
+ *
+ * Out and In are both shown because they can differ. When they do, the shelf
+ * was recounted in the same edit, Quantity is the smaller of the two - the most
+ * that can honestly be called moved - and the difference is visible here rather
+ * than quietly folded into the figure.
  *
  * @param {object} options
  * @returns {string}
  */
 export function renderTransferViewPage({ transfer, flash = null }) {
+  const adjusted = transfer.quantityOut !== transfer.quantityIn;
+
+  const lines = transfer.lines
+    .map(
+      (line) => `          <tr>
+            <td class="sku">${escapeHtml(line.sku)}</td>
+            <td class="name">${escapeHtml(line.productName)}</td>
+            <td class="num">${escapeHtml(number(line.quantity))}</td>
+            <td class="num">${escapeHtml(number(line.quantityOut))}</td>
+            <td class="num">${escapeHtml(number(line.quantityIn))}</td>
+            <td><span class="pill ${escapeHtml(transferStatusClass(line.status))}">${escapeHtml(line.status)}</span></td>
+            ${rowActions([{ label: 'View', href: href('/products/view', { sku: line.sku }) }])}
+          </tr>`,
+    )
+    .join('\n');
+
+  const head =
+    '<th>SKU</th><th>Product</th><th class="num">Qty</th><th class="num">Out</th><th class="num">In</th><th>Status</th><th class="row-actions">Action</th>';
+
+  const extra = `    <h2>${escapeHtml(`${transfer.skuCount === 1 ? '1 SKU line' : `${number(transfer.skuCount)} SKU lines`}`)}</h2>
+${tableOrEmpty(lines, head, 'This transfer has no lines.')}`;
+
   return renderRecordPage({
     title: `Transfer ${transfer.id}`,
     activePath: '/transfers',
-    lede: `${transfer.quantity} x ${transfer.sku}.`,
+    lede: `${number(transfer.quantity)} units from ${transfer.fromWarehouseName} to ${transfer.toWarehouseName} on ${transfer.raisedOn}.`,
     flash,
-    note: 'Read from the source database. Nothing on this page can be changed here.',
+    extra,
     actions: [
       { label: 'Back to transfers', href: '/transfers', tone: 'secondary' },
     ],
     rows: [
-      { label: 'Transfer ID', text: transfer.id },
-      { label: 'SKU', text: transfer.sku },
-      { label: 'Product', text: transfer.productName },
+      {
+        label: 'Reference',
+        text: transfer.id,
+        derived:
+          'Derived. ledsone holds no transfer reference; this identifies the ' +
+          'stock-change event these lines were recorded in.',
+      },
       { label: 'From', text: transfer.fromWarehouseName },
       { label: 'To', text: transfer.toWarehouseName },
-      { label: 'Quantity', text: number(transfer.quantity) },
+      {
+        label: 'Quantity',
+        text: number(transfer.quantity),
+        derived: adjusted
+          ? `The lower of ${number(transfer.quantityOut)} out and ${number(transfer.quantityIn)} in.`
+          : '',
+      },
+      { label: 'Out of source', text: number(transfer.quantityOut) },
+      { label: 'Into destination', text: number(transfer.quantityIn) },
       {
         label: 'Status',
         html: `<span class="pill ${escapeHtml(transferStatusClass(transfer.status))}">${escapeHtml(transfer.status)}</span>`,
+        derived:
+          'Derived. The source records movements that have already been ' +
+          'applied to both warehouses; it has no pending or in-transit state.',
       },
-      { label: 'Raised on', text: transfer.raisedOn },
+      { label: 'Date', text: transfer.raisedOn },
+      { label: 'Recorded by', text: transfer.recordedBy },
+      { label: 'Reason', text: transfer.note },
     ],
   });
 }
@@ -1810,50 +1902,90 @@ export function renderReadOnlyPage() {
  * The one script in the system, served from this origin as /filters.js.
  *
  * It does exactly one thing: when a control in a list-screen filter bar
- * changes, it submits that bar. That is the whole of the client-side behaviour
- * - there is no framework, no bundle, no dependency and no other script.
+ * changes, it navigates to that bar's filtered URL. That is the whole of the
+ * client-side behaviour - no framework, no bundle, no dependency, no other
+ * script.
  *
- * Three details are deliberate:
+ * ---------------------------------------------------------------------------
+ * IT DOES NOT TOUCH A SINGLE CONTROL, AND THAT IS THE POINT
+ *
+ * This function used to build its clean URL by walking the form and setting
+ * `disabled = true` on every field still sitting at "All", because a disabled
+ * field is not submitted - so ?status=Received came out instead of
+ * ?q=&status=Received&from=&to=. The comment above it said the page navigated
+ * immediately afterwards, so the change was never seen.
+ *
+ * On this application that was not true, and it produced the bug staff
+ * reported: choose Status, and Warehouse From, Warehouse To and the search box
+ * all went grey and stopped responding.
+ *
+ *   - A screen reads six and a half thousand products and sixty-eight thousand
+ *     stock lines. Every cache miss is a visible wait, and the whole of it was
+ *     spent looking at three dead dropdowns.
+ *   - Coming back with the browser's Back button restores the page from the
+ *     back-forward cache WITH those disabled properties intact, so the filter
+ *     bar stayed unusable until a hard reload.
+ *   - If the navigation failed for any reason, the bar never came back at all.
+ *
+ * Nothing was cascading, and nothing was restricting the options - the server
+ * has always offered every category, supplier, warehouse and status from the
+ * whole data set, and has always ANDed the filters together. The choices were
+ * there; they had simply been switched off in the page.
+ *
+ * So the URL is now assembled from the form's values and navigated to. The
+ * live DOM is never written to: no field is disabled, no option is removed, no
+ * dropdown is rebuilt. Every filter stays selectable while another is applied,
+ * and Status + Warehouse From + Warehouse To + Search combine because all four
+ * are read off the same form.
+ *
+ * Two further details are deliberate and unchanged:
  *
  * 1. It listens on the document rather than wiring up each control, so it does
  *    not care when it runs or what the page redraws.
  *
- * 2. It checks the form carries class="filters" before doing anything. The
- *    add and edit forms are class="record" and are submitted by their own Save
- *    button; nothing here touches them.
+ * 2. It checks the form carries class="filters" before doing anything.
  *
- * 3. It drops empty fields before submitting. Without that, choosing "All
- *    categories" would produce ?category=&supplier= rather than a clean URL,
- *    and the address bar would stop being a readable description of the screen.
- *    The page navigates immediately afterwards, so the change is never seen.
+ * `page` is deliberately not carried over: a narrowed list has fewer pages, so
+ * changing a filter starts at the first one again.
  *
- * With scripting turned off the filters do not apply themselves. Everything
- * else - every screen, every record, every link - still works exactly as it
- * did, because nothing else on any page depends on this file.
+ * With scripting off, the Apply button in the bar submits the same form to the
+ * same place by ordinary GET. The only difference is that empty fields are
+ * then submitted as empty, which every route already reads as "no filter".
  *
  * @returns {string} JavaScript source.
  */
 export function renderFilterScript() {
   return `"use strict";
 /* Smart Inventory Control - list-screen filters. Applied on change. */
-document.addEventListener("change", function (event) {
-  var control = event.target;
-  if (!control || !control.form) return;
+(function () {
+  // Tells the stylesheet the Apply button is not needed. Without scripting
+  // this class never lands, and the button stays on screen.
+  document.documentElement.className += " js";
 
-  var form = control.form;
-  if (!form.classList.contains("filters")) return;
+  document.addEventListener("change", function (event) {
+    var control = event.target;
+    if (!control || !control.form) return;
 
-  var tag = control.tagName;
-  if (tag !== "SELECT" && !(tag === "INPUT" && control.type === "search")) return;
+    var form = control.form;
+    if (!form.classList.contains("filters")) return;
 
-  // A filter left at "All" should leave the URL, not sit in it empty.
-  for (var i = 0; i < form.elements.length; i += 1) {
-    var field = form.elements[i];
-    if (field.name && field.value === "") field.disabled = true;
-  }
+    var tag = control.tagName;
+    if (tag !== "SELECT" && !(tag === "INPUT" && control.type === "search")) return;
 
-  form.submit();
-});
+    // Read the bar, do not rewrite it. A filter left at "All" is simply left
+    // out of the URL; it is never disabled, and it stays usable for the next
+    // thing the user wants to narrow by.
+    var parts = [];
+    for (var i = 0; i < form.elements.length; i += 1) {
+      var field = form.elements[i];
+      if (!field.name || field.value === "") continue;
+      parts.push(encodeURIComponent(field.name) + "=" + encodeURIComponent(field.value));
+    }
+
+    var action = form.getAttribute("action") || location.pathname;
+    location.assign(parts.length ? action + "?" + parts.join("&") : action);
+  });
+})();
 `;
 }
 

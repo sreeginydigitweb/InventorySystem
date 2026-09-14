@@ -47,14 +47,21 @@ Any one of the four would be enough.
 
 ## What the source does not hold
 
-Three things the screens can show have no source column. None of them is filled
-in with an invented value; each screen says what is missing and why.
+Two things the screens can show have no source column. Neither is filled in
+with an invented value; each screen says what is missing and why.
 
 | Missing | Affects | What the system does instead |
 | --- | --- | --- |
 | Minimum / reorder level per SKU per site | Low Stock rule, Dashboard "Low Stock" card | Judged against one application-wide threshold, `LOW_STOCK_THRESHOLD` in `rules.js`, printed above the Warehouse Stock table. Not presented as the business's figure. |
-| Inter-warehouse transfers | Transfers screen, Dashboard "Pending Transfers" card | The screen is empty and says so. The card reads 0. Nothing is invented, and nothing can be created. |
 | Physical stock counts | Inventory Audit screen, Dashboard "Discrepancies" card | The screen is empty and says so. The card reads 0. `Difference = Counted − System` is still the only definition; there is simply nothing to apply it to. |
+
+Transfers have no table of their own, but they are recorded: they are read out
+of the stock-change log in `inventory.product_history.history`. A line counts as
+a transfer when one UK unit's stock fell and another's rose in the same edit.
+The source has no transfer number and no workflow, so the reference is derived
+(a hash of the event, labelled as derived) and every transfer is `Received` or
+`Received (Adjusted)` — never Pending or In Transit. See the Transfers section
+of `inventory/source.js`.
 
 A SKU with no Shopify listing, no purchase order or no sales in the window shows
 **Not recorded** for Category, Supplier or units sold, rather than a blank or a

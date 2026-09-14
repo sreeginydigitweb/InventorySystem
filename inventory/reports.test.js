@@ -21,17 +21,18 @@ import {
   productsReport,
   stockReport,
   transferCounts,
+  transferGroup,
   transfersReport,
   unknownSkus,
 } from './reports.js';
 import { AUDIT_COUNTS } from './testdata/audit.js';
 import { PRODUCTS } from './testdata/products.js';
 import { STOCK_LINES } from './testdata/stock.js';
-import { TRANSFERS, TRANSFER_STATUSES } from './testdata/transfers.js';
+import { TRANSFERS } from './testdata/transfers.js';
 import { STOCK_STATUS } from './rules.js';
 
 import { WAREHOUSES } from './testdata/warehouses.js';
-import { memorySource, useSource } from './store.js';
+import { TRANSFER_STATUSES, memorySource, useSource } from './store.js';
 
 // The reports read whatever the store's source hands them. That source is
 // pointed at the sample arrays in ./testdata for the whole of this file, so no
@@ -189,12 +190,12 @@ describe('dashboardMetrics', () => {
     assert.equal(metrics.discrepancies, (await auditReport()).filter((row) => !row.matches).length);
   });
 
-  test('pending transfers matches the transfers at that status', async () => {
-    assert.equal(metrics.pendingTransfers, 3);
-    assert.equal(
-      metrics.pendingTransfers,
-      TRANSFERS.filter((transfer) => transfer.status === 'Pending').length,
-    );
+  test('stock transfers counts the movements the source actually records', async () => {
+    // This card used to count "pending" transfers - a status ledsone has no
+    // trace of - so it could only ever read zero and its link could only ever
+    // land on an empty screen.
+    assert.equal(metrics.stockTransfers, TRANSFERS.length);
+    assert.equal(metrics.pendingTransfers, undefined, 'the invented status is still counted');
   });
 });
 
@@ -214,14 +215,30 @@ describe('issueCounts', () => {
 });
 
 describe('transferCounts', () => {
-  test('covers the three statuses in workflow order', async () => {
+  test('covers only the statuses the source can actually hold', async () => {
     assert.deepEqual(
       (await transferCounts()).map((row) => row.status),
-      ['Pending', 'In Transit', 'Received'],
+      ['Received', 'Received (Adjusted)'],
     );
   });
 
-  test('all three statuses are demonstrated', async () => {
+  test('offers no Pending or In Transit, because the source has neither', async () => {
+    // Searching the whole of the real log finds "pending" zero times, "in
+    // transit" zero times and "awaiting" zero times. Offering them as filters
+    // meant two of three dropdown options could only return an empty screen.
+    const counts = await transferCounts();
+
+    for (const invented of ['Pending', 'In Transit', 'Awaiting']) {
+      assert.equal(TRANSFER_STATUSES.includes(invented), false, `${invented} is still offered`);
+      assert.equal(
+        counts.some((row) => row.status === invented),
+        false,
+        `the dashboard still counts ${invented}`,
+      );
+    }
+  });
+
+  test('both statuses are demonstrated', async () => {
     for (const row of await transferCounts()) {
       assert.ok(row.count > 0, `no transfer is ${row.status}`);
     }
@@ -232,17 +249,20 @@ describe('transferCounts', () => {
     assert.equal(total, TRANSFERS.length);
   });
 
-  test('no transfer carries a status outside the three declared ones', async () => {
+  test('no transfer carries a status outside the declared ones', async () => {
     for (const transfer of TRANSFERS) {
-      assert.ok(TRANSFER_STATUSES.includes(transfer.status), `${transfer.id} is ${transfer.status}`);
+      assert.ok(
+        TRANSFER_STATUSES.includes(transfer.status),
+        `${transfer.id} ${transfer.sku} is ${transfer.status}`,
+      );
     }
   });
 });
 
 describe('transfersReport', () => {
   test('resolves the SKU and both warehouses to names', async () => {
-    const transfer = (await transfersReport()).find((row) => row.id === 'TR-1001');
-    assert.equal(transfer.productName, 'Halden Flush Ceiling Dome 30cm');
+    const transfer = (await transfersReport()).find((row) => row.sku === 'SIC-1001');
+    assert.equal(transfer.productName, 'Aurora 3-Light Ceiling Pendant');
     assert.equal(transfer.fromWarehouseName, 'Birmingham Central');
     assert.equal(transfer.toWarehouseName, 'Manchester North');
   });
@@ -251,6 +271,64 @@ describe('transfersReport', () => {
     for (const transfer of await transfersReport()) {
       assert.notEqual(transfer.fromWarehouseId, transfer.toWarehouseId, transfer.id);
     }
+  });
+
+  test('carries who recorded the movement and why', async () => {
+    for (const transfer of await transfersReport()) {
+      assert.equal(typeof transfer.recordedBy, 'string');
+      assert.ok(transfer.recordedBy.length > 0, `${transfer.id} has no recorded-by`);
+      assert.equal(typeof transfer.note, 'string');
+    }
+  });
+
+  test('quantity is never more than the smaller of the two legs', async () => {
+    // Where the legs disagree the difference is a recount, not stock that
+    // moved. Reporting the larger figure would overstate the movement.
+    for (const transfer of await transfersReport()) {
+      assert.equal(
+        transfer.quantity,
+        Math.min(transfer.quantityOut, transfer.quantityIn),
+        `${transfer.id} ${transfer.sku} overstates what moved`,
+      );
+    }
+  });
+});
+
+describe('transferGroup', () => {
+  test('gathers every SKU line recorded under one reference', async () => {
+    const group = await transferGroup('TR-GROUP01');
+
+    assert.equal(group.skuCount, 3, 'a multi-SKU transfer lost lines');
+    assert.deepEqual(
+      group.lines.map((line) => line.sku).sort(),
+      ['SIC-1001', 'SIC-1002', 'SIC-2001'],
+    );
+  });
+
+  test('sums the lines rather than reporting only the first', async () => {
+    const group = await transferGroup('TR-GROUP01');
+
+    assert.equal(group.quantity, 40 + 60 + 25);
+    assert.equal(group.quantityOut, 40 + 60 + 30);
+    assert.equal(group.quantityIn, 40 + 60 + 25);
+  });
+
+  test('a transfer with any adjusted line is an adjusted transfer', async () => {
+    assert.equal((await transferGroup('TR-GROUP01')).status, 'Received (Adjusted)');
+    assert.equal((await transferGroup('TR-SINGLE1')).status, 'Received');
+  });
+
+  test('keeps the header facts every line in the group shares', async () => {
+    const group = await transferGroup('TR-GROUP01');
+
+    assert.equal(group.fromWarehouseName, 'Birmingham Central');
+    assert.equal(group.toWarehouseName, 'Manchester North');
+    assert.equal(group.raisedOn, '2026-09-08');
+    assert.equal(group.recordedBy, 'mithusha');
+  });
+
+  test('an unknown reference is null, not an empty transfer', async () => {
+    assert.equal(await transferGroup('TR-NOT-A-REFERENCE'), null);
   });
 });
 

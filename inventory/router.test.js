@@ -11,7 +11,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { route, routeForm } from './router.js';
-import { memorySource, useSource } from './store.js';
+import { TRANSFER_STATUSES, memorySource, useSource } from './store.js';
 import { PRODUCTS } from './testdata/products.js';
 import { WAREHOUSES } from './testdata/warehouses.js';
 import { STOCK_LINES } from './testdata/stock.js';
@@ -42,6 +42,21 @@ after(() => useSource());
 /** Fetch a screen, optionally with a query string. */
 async function get(path, query = '') {
   return await route(path, new URLSearchParams(query));
+}
+
+/**
+ * The body rows of a list screen's table, as raw HTML.
+ *
+ * For checking that every row on screen really does satisfy every filter that
+ * was applied, rather than only that the count went down.
+ *
+ * @param {string} body
+ * @returns {string[]}
+ */
+function tableRows(body) {
+  const table = body.split('<tbody>')[1];
+  if (!table) return [];
+  return table.split('</tbody>')[0].split('<tr').slice(1);
 }
 
 /**
@@ -109,7 +124,7 @@ describe('dashboard', () => {
       'Low Stock',
       'Out-of-Stock Items',
       'Discrepancies',
-      'Pending Transfers',
+      'Stock Transfers',
     ]) {
       assert.ok(body.includes(label), `the dashboard is missing ${label}`);
     }
@@ -125,7 +140,7 @@ describe('dashboard', () => {
       metrics.lowStock,
       metrics.outOfStock,
       metrics.discrepancies,
-      metrics.pendingTransfers,
+      metrics.stockTransfers,
     ]) {
       assert.ok(
         body.includes(`<div class="value">${value}</div>`),
@@ -205,7 +220,10 @@ describe('dashboard', () => {
     const rows = summaryRows(body, 'Transfers by status');
 
     assert.ok(body.includes('<h2>Transfers by status</h2>'));
-    assert.deepEqual(counts.map((row) => row.status), ['Pending', 'In Transit', 'Received']);
+    // Only the statuses a movement in this source can actually hold. Pending
+    // and In Transit were a workflow ledsone has no trace of, and every row
+    // under them was permanently zero.
+    assert.deepEqual(counts.map((row) => row.status), ['Received', 'Received (Adjusted)']);
 
     assert.deepEqual(rows.map((row) => row.badge), counts.map((row) => row.status));
     assert.deepEqual(rows.map((row) => row.count), counts.map((row) => row.count));
@@ -221,7 +239,7 @@ describe('dashboard', () => {
       (match) => match[1].replaceAll('&amp;', '&'),
     );
 
-    assert.equal(links.length, 9, 'expected six issue links and three transfer links');
+    assert.equal(links.length, 8, 'expected six issue links and two transfer links');
 
     for (const href of links) {
       const url = new URL(href, 'http://localhost');
@@ -344,7 +362,7 @@ describe('dashboard', () => {
       ['/products?stock=Healthy', metrics.healthyStock],
       ['/products?stock=Low+Stock', metrics.lowStock],
       ['/products?stock=Out+of+Stock', metrics.outOfStock],
-      ['/transfers?status=Pending', metrics.pendingTransfers],
+      ['/transfers', metrics.stockTransfers],
       ['/audit?show=discrepancy', metrics.discrepancies],
     ]) {
       const url = new URL(href, 'http://localhost');
@@ -370,7 +388,7 @@ describe('dashboard', () => {
       '/products?stock=Low+Stock',
       '/products?stock=Out+of+Stock',
       '/audit?show=discrepancy',
-      '/transfers?status=Pending',
+      '/transfers',
     ]) {
       assert.ok(body.includes(`href="${href}"`), `no card links to ${href}`);
 
@@ -720,22 +738,52 @@ describe('alerts: one severity must not crowd out the rest', () => {
 describe('transfers screen', () => {
   test('shows the required columns', async () => {
     const { body } = await get('/transfers');
-    for (const heading of ['Transfer ID', 'SKU', 'Product', 'From', 'To', 'Qty', 'Status']) {
+    for (const heading of [
+      'Reference',
+      'SKU',
+      'Product',
+      'From',
+      'To',
+      'Qty',
+      'Status',
+      'Date',
+      'Recorded by',
+      'Reason',
+    ]) {
       assert.ok(body.includes(heading), `missing column ${heading}`);
     }
   });
 
-  test('each of the three statuses can be filtered to, and each has rows', async () => {
-    for (const status of ['Pending', 'In Transit', 'Received']) {
+  test('each status the source can hold can be filtered to, and each has rows', async () => {
+    for (const status of TRANSFER_STATUSES) {
       const { shown } = shownCount((await get('/transfers', `status=${encodeURIComponent(status)}`)).body);
       assert.ok(shown > 0, `no transfer is ${status}`);
     }
   });
 
-  test('the three statuses add up to every transfer', async () => {
+  test('offers no Pending or In Transit filter, and invents no rows for them', async () => {
+    const { body } = await get('/transfers');
+
+    for (const invented of ['Pending', 'In Transit']) {
+      assert.equal(
+        body.includes(`<option value="${invented}"`),
+        false,
+        `the Status dropdown still offers ${invented}`,
+      );
+
+      // An unrecognised status is dropped rather than applied, so the URL
+      // lands on the unfiltered screen - not on a screen of fabricated rows.
+      const { matched, total } = shownCount(
+        (await get('/transfers', `status=${encodeURIComponent(invented)}`)).body,
+      );
+      assert.equal(matched, total, `${invented} produced rows the source does not hold`);
+    }
+  });
+
+  test('the statuses add up to every transfer', async () => {
     const total = shownCount((await get('/transfers')).body).total;
     let summed = 0;
-    for (const status of ['Pending', 'In Transit', 'Received']) {
+    for (const status of TRANSFER_STATUSES) {
       summed += shownCount((await get('/transfers', `status=${encodeURIComponent(status)}`)).body).shown;
     }
     assert.equal(summed, total);
@@ -757,6 +805,105 @@ describe('transfers screen', () => {
     const leg = shownCount((await get('/transfers', 'from=WH-BIR&to=WH-MAN')).body);
 
     assert.ok(leg.shown > 0 && leg.shown <= out.shown);
+  });
+
+  test('searches the SKU, product, warehouses, reason, user and reference', async () => {
+    for (const [term, expected] of [
+      ['SIC-3001', 'the SKU'],
+      ['aurora', 'the product name'],
+      ['Leeds', 'a warehouse name'],
+      ['refill check', 'the reason'],
+      ['Slakshika', 'who recorded it'],
+      ['TR-GROUP01', 'the derived reference'],
+    ]) {
+      const { shown, matched, total } = shownCount((await get('/transfers', `q=${encodeURIComponent(term)}`)).body);
+      assert.ok(shown > 0, `searching ${expected} (${term}) found nothing`);
+      assert.ok(matched < total, `searching ${expected} (${term}) narrowed nothing`);
+    }
+  });
+
+  test('search is case-insensitive, partial, and literal rather than a pattern', async () => {
+    const lower = shownCount((await get('/transfers', 'q=sic-3001')).body).matched;
+    const upper = shownCount((await get('/transfers', 'q=SIC-3001')).body).matched;
+    const partial = shownCount((await get('/transfers', 'q=SIC-30')).body).matched;
+
+    assert.equal(lower, upper, 'search is case-sensitive');
+    assert.ok(partial >= upper, 'a partial term finds less than the whole one');
+
+    // A regex metacharacter is the character, not a pattern: ".*" matches
+    // nothing rather than everything.
+    assert.equal(shownCount((await get('/transfers', 'q=.*')).body).matched, 0);
+  });
+
+  test('search combines with status, from and to', async () => {
+    const all = shownCount((await get('/transfers')).body).total;
+
+    const combined = shownCount(
+      (await get('/transfers', 'q=SIC&status=Received&from=WH-BIR&to=WH-MAN')).body,
+    );
+
+    assert.ok(combined.matched > 0, 'the four filters together match nothing');
+    assert.ok(combined.matched < all, 'the four filters together narrow nothing');
+
+    // Each condition genuinely applies: every row on screen satisfies all four.
+    const { body } = await get('/transfers', 'q=SIC&status=Received&from=WH-BIR&to=WH-MAN');
+    for (const row of tableRows(body)) {
+      assert.ok(row.includes('Birmingham Central'), 'a row is not from Birmingham');
+      assert.ok(row.includes('Manchester North'), 'a row is not to Manchester');
+      assert.ok(row.includes('>Received<'), 'a row is not Received');
+      assert.ok(/SIC-\d+/.test(row), 'a row does not match the search');
+    }
+  });
+
+  test('search and each filter narrow on their own as well as together', async () => {
+    const all = shownCount((await get('/transfers')).body).total;
+
+    for (const query of [
+      'q=SIC-3001',
+      'status=Received+%28Adjusted%29',
+      'from=WH-MAN',
+      'to=WH-BIR',
+      'q=SIC&from=WH-BIR',
+      'status=Received&to=WH-MAN',
+      'q=stock+take&status=Received&from=WH-BIR',
+    ]) {
+      const { matched } = shownCount((await get('/transfers', query)).body);
+      assert.ok(matched > 0, `${query} matches nothing`);
+      assert.ok(matched < all, `${query} narrows nothing`);
+    }
+  });
+
+  test('a search matching nothing says so and names the term', async () => {
+    const { body } = await get('/transfers', 'q=zzzznothinghere');
+
+    assert.equal(shownCount(body).matched, 0);
+    assert.match(body, /No transfers match/);
+    assert.ok(body.includes('zzzznothinghere'), 'the empty state does not quote the term');
+    assert.equal(body.includes('<tbody>'), false, 'an empty result still rendered a table');
+  });
+
+  test('View opens the whole movement, not just the row that was clicked', async () => {
+    // 303 of the 776 real transfers move more than one SKU under one
+    // reference. Opening one must show all of its lines.
+    const { body } = await get('/transfers', 'q=TR-GROUP01');
+    const [first] = [...body.matchAll(/href="(\/transfers\/view[^"]*)"/g)].map((match) =>
+      match[1].replaceAll('&amp;', '&'),
+    );
+
+    const url = new URL(first, 'http://localhost');
+    const viewed = await route(url.pathname, url.searchParams);
+
+    assert.equal(viewed.status, 200);
+    for (const sku of ['SIC-1001', 'SIC-1002', 'SIC-2001']) {
+      assert.ok(viewed.body.includes(sku), `the transfer page is missing line ${sku}`);
+    }
+
+    // And it says the reference is derived rather than a business number.
+    assert.match(viewed.body, /ledsone holds no transfer reference/);
+  });
+
+  test('an unknown reference is a 404, not an empty transfer page', async () => {
+    assert.equal((await get('/transfers/view', 'id=TR-NOT-REAL')).status, 404);
   });
 });
 
@@ -1312,5 +1459,385 @@ describe('search runs over the whole set, before the page window', () => {
     const next = body.match(/rel="next" href="([^"]+)"/)?.[1].replaceAll('&amp;', '&');
     assert.ok(next.includes('q=kettle'), 'the next link drops the search');
     assert.ok(next.includes('type=Negative'), 'the next link drops the type filter');
+  });
+});
+
+/* ========================================================================== */
+/* The filter bar                                                             */
+/* ========================================================================== */
+
+/**
+ * The bug staff reported, and the rule that replaces it.
+ *
+ * Choosing Status used to grey out Warehouse from, Warehouse to and the search
+ * box: /filters.js disabled every control still sitting at "All" before
+ * submitting, and never put them back. Nothing was cascading and nothing was
+ * restricting the options - the choices were there, they had simply been
+ * switched off in the page.
+ *
+ * So these tests are about one property, checked from both ends: applying a
+ * filter must leave every other filter exactly as usable, and as fully stocked
+ * with options, as it was before.
+ */
+describe('the filter bar keeps every filter usable', () => {
+  /** The filter bar of a rendered screen. */
+  const barOf = (body) => body.match(/<form class="filters"[\s\S]*?<\/form>/)[0];
+
+  /** Every dropdown in a filter bar, as name -> the option values it offers. */
+  function dropdowns(body) {
+    const bar = barOf(body);
+    const found = {};
+
+    for (const select of bar.matchAll(/<select id="[^"]*" name="([^"]+)">([\s\S]*?)<\/select>/g)) {
+      found[select[1]] = [...select[2].matchAll(/<option value="([^"]*)"/g)].map((o) => o[1]);
+    }
+
+    return found;
+  }
+
+  /** The search inputs in a filter bar, as name -> value. */
+  function searches(body) {
+    const bar = barOf(body);
+    const found = {};
+
+    for (const input of bar.matchAll(/<input type="search" id="[^"]*" name="([^"]+)" value="([^"]*)"/g)) {
+      found[input[1]] = input[2];
+    }
+
+    return found;
+  }
+
+  // Every list screen, and a filter on each that is worth applying.
+  const SCREENS = [
+    ['/products', 'stock=Low+Stock'],
+    ['/stock', 'warehouse=WH-BIR'],
+    ['/alerts', 'type=Out+of+Stock'],
+    ['/transfers', 'status=Received'],
+    ['/audit', 'show=discrepancy'],
+  ];
+
+  for (const [path, applied] of SCREENS) {
+    describe(path, () => {
+      test('no control in the bar is ever disabled', async () => {
+        for (const query of ['', applied, `${applied}&q=SIC`]) {
+          const bar = barOf((await get(path, query)).body);
+          assert.equal(bar.includes('disabled'), false, `${path}?${query} disables a control`);
+        }
+      });
+
+      test('applying one filter leaves every other dropdown fully stocked', async () => {
+        // No cascading. The options a dropdown offers come from the whole data
+        // set and must not shrink because something else was selected.
+        const before = dropdowns((await get(path)).body);
+        const after = dropdowns((await get(path, applied)).body);
+
+        assert.deepEqual(Object.keys(after), Object.keys(before), 'a dropdown disappeared');
+
+        for (const [name, options] of Object.entries(before)) {
+          assert.deepEqual(after[name], options, `the ${name} dropdown lost options`);
+        }
+      });
+
+      test('the bar carries no page number, so changing a filter starts at page one', async () => {
+        // The form is what a changed filter submits. A hidden page field here
+        // would carry the reader to page 7 of a list that now has two pages.
+        const bar = barOf((await get(path, `${applied}&page=2`)).body);
+        assert.equal(/name="page"/.test(bar), false, 'the filter bar would carry a page number');
+      });
+
+      test('carries an Apply button, so the bar still works without JavaScript', async () => {
+        const bar = barOf((await get(path)).body);
+        assert.match(bar, /<button type="submit" class="apply">Apply<\/button>/);
+      });
+
+      test('the bar is a plain GET form pointing at its own screen', async () => {
+        const bar = barOf((await get(path)).body);
+        assert.ok(bar.startsWith(`<form class="filters" method="get" action="${path}"`));
+      });
+
+      test('offers Clear filters once something is applied, and not before', async () => {
+        assert.equal(barOf((await get(path)).body).includes('Clear filters'), false);
+        assert.match(barOf((await get(path, applied)).body), /Clear filters<\/a>/);
+      });
+
+      test('"All" is the first option of every dropdown and means no filter', async () => {
+        const unfiltered = shownCount((await get(path)).body);
+
+        for (const [name, options] of Object.entries(dropdowns((await get(path)).body))) {
+          assert.equal(options[0], '', `the ${name} dropdown has no All option first`);
+
+          // Selecting All explicitly is the same screen as not selecting it.
+          const explicit = shownCount((await get(path, `${name}=`)).body);
+          assert.equal(explicit.matched, unfiltered.matched, `an empty ${name} narrowed the screen`);
+        }
+      });
+
+      test('an unrecognised filter value shows the whole screen, not an empty one', async () => {
+        for (const name of Object.keys(dropdowns((await get(path)).body))) {
+          const { matched, total } = shownCount((await get(path, `${name}=not-a-real-value`)).body);
+          assert.equal(matched, total, `a junk ${name} emptied the screen`);
+        }
+      });
+    });
+  }
+
+  test('a search term is kept in the box, and kept when another filter is applied', async () => {
+    for (const [path, applied] of SCREENS) {
+      const searched = searches((await get(path, 'q=SIC')).body);
+      if (Object.keys(searched).length === 0) continue;
+
+      assert.equal(searched.q, 'SIC', `${path} forgot the search term`);
+
+      const both = searches((await get(path, `q=SIC&${applied}`)).body);
+      assert.equal(both.q, 'SIC', `${path} dropped the search when a filter was applied`);
+    }
+  });
+});
+
+describe('filters combine, and pagination keeps them', () => {
+  // One case per screen: two or more conditions that must all hold at once.
+  const CASES = [
+    {
+      path: '/products',
+      query: 'q=SIC&category=Bulbs&stock=Healthy',
+      mustHold: (row) =>
+        row.includes('SIC-') && row.includes('>Bulbs<') && row.includes('>Healthy<'),
+    },
+    {
+      path: '/stock',
+      query: 'q=SIC&warehouse=WH-BIR&status=Low+Stock',
+      mustHold: (row) => row.includes('Birmingham Central') && row.includes('>Low Stock<'),
+    },
+    {
+      path: '/alerts',
+      query: 'q=SIC&type=Out+of+Stock&warehouse=WH-BIR',
+      mustHold: (row) => row.includes('Birmingham Central') && row.includes('>Out of Stock<'),
+    },
+    {
+      path: '/transfers',
+      query: 'q=SIC&status=Received&from=WH-BIR&to=WH-MAN',
+      mustHold: (row) =>
+        row.includes('Birmingham Central') &&
+        row.includes('Manchester North') &&
+        row.includes('>Received<'),
+    },
+  ];
+
+  for (const { path, query, mustHold } of CASES) {
+    test(`${path}: every row satisfies every condition at once`, async () => {
+      const all = shownCount((await get(path)).body).total;
+      const { body } = await get(path, query);
+      const { matched } = shownCount(body);
+
+      assert.ok(matched > 0, `${path}?${query} matches nothing`);
+      assert.ok(matched < all, `${path}?${query} narrows nothing`);
+
+      const rows = tableRows(body);
+      assert.ok(rows.length > 0, 'no rows were rendered');
+      for (const row of rows) {
+        assert.ok(mustHold(row), `a row on ${path}?${query} does not satisfy every filter`);
+      }
+    });
+
+    test(`${path}: dropping one condition never narrows the result`, async () => {
+      // Proof that each condition is doing its own work, rather than one of
+      // them quietly deciding the whole result.
+      const parts = query.split('&');
+      const full = shownCount((await get(path, query)).body).matched;
+
+      for (let i = 0; i < parts.length; i += 1) {
+        const without = parts.filter((_, index) => index !== i).join('&');
+        const widened = shownCount((await get(path, without)).body).matched;
+
+        assert.ok(widened >= full, `dropping ${parts[i]} on ${path} narrowed the result`);
+      }
+    });
+
+    test(`${path}: the pager carries every filter and the search`, async () => {
+      const { body } = await get(path, `${query}&page=1`);
+      const next = body.match(/rel="next" href="([^"]+)"/)?.[1]?.replaceAll('&amp;', '&');
+
+      // Not every fixture screen runs to a second page; when one does, the
+      // link must carry the whole filter set rather than the page alone.
+      if (!next) return;
+
+      for (const part of query.split('&')) {
+        assert.ok(next.includes(part), `the next link on ${path} dropped ${part}`);
+      }
+    });
+
+    test(`${path}: a page beyond the end lands on a real page, not an error`, async () => {
+      const { status, body } = await get(path, `${query}&page=999`);
+      assert.equal(status, 200);
+      assert.ok(shownCount(body).matched >= 0);
+    });
+
+    test(`${path}: a term matching nothing empties the screen and says so`, async () => {
+      // The term REPLACES the one already in the query - a repeated
+      // parameter takes the first value, so appending would search for the
+      // original term again.
+      const missing = query.replace(/(^|&)q=[^&]*/, '').replace(/^&/, '');
+      const { body } = await get(path, `${missing}&q=zzzznothinghere`);
+
+      assert.equal(shownCount(body).matched, 0);
+      assert.ok(body.includes('zzzznothinghere'), 'the empty state does not quote the term');
+      assert.equal(body.includes('<tbody>'), false, 'an empty result still rendered a table');
+
+      // And the bar is still there and still usable, so the reader can get
+      // back out again.
+      assert.match(body, /<form class="filters"/);
+      const bar = body.match(/<form class="filters"[\s\S]*?<\/form>/)[0];
+      assert.equal(bar.includes('disabled'), false, 'the empty screen disabled the filters');
+    });
+  }
+});
+
+describe('transfers search runs over the whole set, before the page window', () => {
+  const MATCHING = 250;
+  const SITE_A = { id: 'W1', name: 'Leeds Depot', location: 'Leeds' };
+  const SITE_B = { id: 'W2', name: 'Hull Annexe', location: 'Hull' };
+
+  const products = [];
+  const transfers = [];
+
+  for (let i = 0; i < MATCHING; i += 1) {
+    const sku = `MOV-${String(i).padStart(3, '0')}`;
+    products.push({
+      sku,
+      name: `Copper Kettle Shade ${i}`,
+      image: null,
+      category: 'Kitchenware',
+      supplier: 'Brassware Supply Co',
+      active: true,
+      endOfLineStatus: null,
+      unitsSoldLast90Days: 100,
+      approvedWarehouses: null,
+    });
+    transfers.push({
+      id: `TR-BULK${String(i).padStart(3, '0')}`,
+      sku,
+      fromWarehouseId: 'W1',
+      toWarehouseId: 'W2',
+      quantity: 10,
+      quantityOut: 10,
+      quantityIn: 10,
+      status: 'Received',
+      raisedOn: '2026-01-01',
+      recordedBy: 'mithusha',
+      note: 'bulk move',
+    });
+  }
+
+  // Decoys sharing none of the searchable text.
+  for (let i = 0; i < 5; i += 1) {
+    const sku = `ZZZ-${i}`;
+    products.push({
+      sku,
+      name: `Unrelated Lamp ${i}`,
+      image: null,
+      category: 'Lighting',
+      supplier: 'Other Supplier',
+      active: true,
+      endOfLineStatus: null,
+      unitsSoldLast90Days: 100,
+      approvedWarehouses: null,
+    });
+    transfers.push({
+      id: `TR-OTHER${i}`,
+      sku,
+      fromWarehouseId: 'W2',
+      toWarehouseId: 'W1',
+      quantity: 1,
+      quantityOut: 1,
+      quantityIn: 1,
+      status: 'Received (Adjusted)',
+      raisedOn: '2026-01-02',
+      recordedBy: 'someone',
+      note: 'unrelated',
+    });
+  }
+
+  /** A movement that sorts past the 200-row window of the unfiltered list. */
+  const DEEP_SKU = 'MOV-240';
+
+  before(() =>
+    useSource(
+      memorySource({
+        products,
+        warehouses: [SITE_A, SITE_B],
+        stockLines: [],
+        transfers,
+        auditCounts: [],
+      }),
+    ),
+  );
+
+  after(() =>
+    useSource(
+      memorySource({
+        products: PRODUCTS,
+        warehouses: WAREHOUSES,
+        stockLines: STOCK_LINES,
+        transfers: TRANSFERS,
+        auditCounts: AUDIT_COUNTS,
+      }),
+    ),
+  );
+
+  test('a movement beyond page one is still found', async () => {
+    const unfiltered = await get('/transfers');
+    assert.ok(!unfiltered.body.includes(DEEP_SKU), `${DEEP_SKU} is already on page one`);
+
+    const { body } = await get('/transfers', `q=${DEEP_SKU}`);
+    assert.equal(shownCount(body).matched, 1, `${DEEP_SKU} was not found by search`);
+    assert.ok(body.includes(DEEP_SKU));
+  });
+
+  test('a term matching more than one page reports the full count', async () => {
+    const { body } = await get('/transfers', 'q=kettle');
+
+    assert.equal(shownCount(body).matched, MATCHING, 'the count is the page, not the matching set');
+    assert.equal(shownCount(body).shown, 200, 'page one is not a full page');
+  });
+
+  test('paging through a search reaches every match, and only matches', async () => {
+    let seen = 0;
+    let page = 1;
+
+    for (;;) {
+      const { status, body } = await get('/transfers', `q=kettle&page=${page}`);
+      assert.equal(status, 200, `page ${page} did not render`);
+
+      const rows = tableRows(body);
+      seen += rows.length;
+
+      for (const row of rows) {
+        assert.ok(!row.includes('ZZZ-'), 'a non-matching decoy appeared in the results');
+      }
+
+      if (!body.includes('rel="next"')) break;
+      page += 1;
+      assert.ok(page < 10, 'pager did not terminate');
+    }
+
+    assert.equal(seen, MATCHING, 'paging a search did not reach every match');
+  });
+
+  test('the pager carries the search, the status and both warehouses', async () => {
+    const { body } = await get('/transfers', 'q=kettle&status=Received&from=W1&to=W2');
+    const next = body.match(/rel="next" href="([^"]+)"/)?.[1].replaceAll('&amp;', '&');
+
+    assert.ok(next, 'a 250-match search offers no next page');
+    for (const part of ['q=kettle', 'status=Received', 'from=W1', 'to=W2']) {
+      assert.ok(next.includes(part), `the next link dropped ${part}`);
+    }
+  });
+
+  test('search and filters together still narrow the whole set', async () => {
+    const both = shownCount((await get('/transfers', 'q=kettle&from=W1&to=W2&status=Received')).body);
+
+    assert.equal(both.matched, MATCHING);
+    assert.equal(both.total, transfers.length);
+    assert.ok(both.matched < both.total, 'the decoys were not excluded');
   });
 });

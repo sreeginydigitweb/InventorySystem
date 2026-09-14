@@ -88,14 +88,19 @@ that could be mistaken for a figure.
 | Missing | Affects | What the system does |
 | --- | --- | --- |
 | Minimum / reorder level | Low Stock rule, Low Stock card | Judged against one application threshold of **10 available**, stated once in `rules.js` and printed above the Warehouse Stock table |
-| Inter-warehouse transfers | Transfers screen, Pending Transfers card | Screen is empty and explains why; card reads 0 |
+| Transfer number / workflow status | Transfers screen | Reference is derived from the event and labelled so; status is `Received` or `Received (Adjusted)` only |
 | Physical stock counts | Inventory Audit screen, Discrepancies card | Screen is empty and explains why; card reads 0 |
 | Approved-sites list per SKU | Warehouse/SKU Mismatch rule | That one check is skipped; the two faults visible in real data are still detected |
 
 Every schema was searched for each of these. `listings.bandq_transfers` is a
 record of category spreadsheets uploaded to B&Q, not stock movements.
-`inventory.product_history` is a free-text edit log with no counted quantity, no
-system quantity and no warehouse, so `Counted − System` cannot be derived from
+
+Transfers themselves *are* recorded, in the free-text stock-change log
+`inventory.product_history.history`. A `UK stock changes:` line where one unit
+fell and another rose is a transfer; the warehouse is taken from the `UnitN`
+token, never the bracketed legacy column name, which disagrees with it. That log
+still cannot serve the audit screen: it holds from/to figures, not a counted
+quantity against a system quantity, so `Counted − System` cannot be derived from
 it without inventing two of its three terms.
 
 ## How the code is laid out
@@ -197,8 +202,9 @@ One row *can* raise several issues where they are genuinely different problems.
 
 ## The dashboard counts SKUs, not stock lines
 
-All six cards count **catalogue SKUs**, so they are one unit and comparable with
-each other. A SKU's band comes from its stock summed across every warehouse
+The stock cards count **catalogue SKUs**, so they are one unit and comparable
+with each other. (Stock Transfers is the exception: it counts recorded transfer
+lines and links to the Transfers screen.) A SKU's band comes from its stock summed across every warehouse
 (`describeSkuPosition` in `rules.js`) — summed, not worst-of, because a product
 with 12 units at one site and none at the other nine can still be sold. Reserved
 is summed too, so committed stock does not count as cover anywhere.
@@ -225,11 +231,11 @@ the card and its destination always show the same number.
 
 | Area | Path | Shows |
 | --- | --- | --- |
-| Dashboard | `/` | Total SKUs, Healthy Stock, Low Stock, Out-of-Stock Items, Discrepancies, Pending Transfers, plus a breakdown by issue type and by transfer status. Every card links through to the screen behind it. |
+| Dashboard | `/` | Total SKUs, Healthy Stock, Low Stock, Out-of-Stock Items, Discrepancies, Stock Transfers, plus a breakdown by issue type and by transfer status. Every card links through to the screen behind it. |
 | Products | `/products` | SKU, image, name, category, supplier, listing status, units held and stock position. Search across SKU, name and supplier; filter by category, supplier and stock position. |
 | Warehouse Stock | `/stock` | SKU, product, warehouse, current, reserved, available and health band. Search by SKU or name; filter by warehouse and band. Problem rows are tinted and negative figures shown in red. |
 | Alerts / Issues | `/alerts` | Every detected issue with the SKU, warehouse, available and a plain-English reason. Filter by issue type and warehouse. |
-| Transfers | `/transfers` | Empty — `ledsone` holds no transfer records. The screen says so. |
+| Transfers | `/transfers` | One row per SKU per movement between UK units: derived reference, SKU, product, from, to, quantity, status, date, recorded by and reason. Search across those; filter by status, warehouse from and warehouse to. View shows the whole movement with every SKU line. |
 | Inventory Audit | `/audit` | Empty — `ledsone` holds no stock counts. The screen says so. |
 
 Each list screen renders at most 200 rows and says so above the table

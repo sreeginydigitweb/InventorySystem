@@ -129,7 +129,12 @@ export async function issuesReport(data) {
 }
 
 /**
- * Every transfer, with product and warehouse names attached.
+ * Every transfer line, with product and warehouse names attached.
+ *
+ * One row per SKU per movement. Rows carrying the same `id` are the SKUs that
+ * moved together in one event - the source has no transfer header, so the
+ * reference is derived and the grouping is what it is for. transferGroup()
+ * below gathers them back up for the detail screen.
  *
  * @param {object} [data]
  * @returns {Promise<object[]>}
@@ -143,6 +148,38 @@ export async function transfersReport(data) {
     fromWarehouseName: warehouseName(snap, transfer.fromWarehouseId),
     toWarehouseName: warehouseName(snap, transfer.toWarehouseId),
   }));
+}
+
+/**
+ * One transfer, as a header and the SKU lines that moved under it.
+ *
+ * Every line in a group shares its date, who recorded it, the note and both
+ * warehouses - that tuple is what the reference was derived from - so the
+ * header is read off the first line rather than recomputed. The quantities are
+ * summed across the lines, and the status is the worse of the two: a transfer
+ * where any line was adjusted is an adjusted transfer.
+ *
+ * @param {string} id     A derived transfer reference.
+ * @param {object} [data]
+ * @returns {Promise<{lines: object[]}|null>} Null when no line carries that id.
+ */
+export async function transferGroup(id, data) {
+  const lines = (await transfersReport(data)).filter((transfer) => transfer.id === id);
+  if (lines.length === 0) return null;
+
+  const total = (field) => lines.reduce((sum, line) => sum + line[field], 0);
+
+  return {
+    ...lines[0],
+    lines,
+    skuCount: new Set(lines.map((line) => line.sku)).size,
+    quantity: total('quantity'),
+    quantityOut: total('quantityOut'),
+    quantityIn: total('quantityIn'),
+    status: lines.some((line) => line.status !== TRANSFER_STATUSES[0])
+      ? TRANSFER_STATUSES[1]
+      : TRANSFER_STATUSES[0],
+  };
 }
 
 /**
@@ -209,7 +246,10 @@ export async function dashboardMetrics(data) {
     outOfStock: countBand(STOCK_STATUS.OUT),
     negativeInventory: countBand(STOCK_STATUS.NEGATIVE),
     discrepancies: audit.filter((row) => !row.matches).length,
-    pendingTransfers: snap.transfers.filter((transfer) => transfer.status === 'Pending').length,
+    // Was "pending transfers", counting a status the source cannot hold - so
+    // the card read 0 for ever. It now counts the movements that are actually
+    // recorded, and lands on the Transfers screen showing exactly those rows.
+    stockTransfers: snap.transfers.length,
     totalStockLines: snap.stockLines.length,
   };
 }
