@@ -19,6 +19,7 @@ import {
   TRANSFER_RECEIVED,
   TRANSFER_RECEIVED_ADJUSTED,
   extractTransfers,
+  joinWrappedEntry,
   parseTransferLine,
   transferReference,
   unitWarehouseMap,
@@ -166,6 +167,85 @@ describe('parseTransferLine: what is not a transfer', () => {
     for (const input of ['', null, undefined, 'Unit3(Quantity)', 'from 1 to 2']) {
       assert.equal(parseTransferLine(input, units), null, `${JSON.stringify(input)} became a transfer`);
     }
+  });
+});
+
+describe('parseTransferLine: who applied it', () => {
+  test('a name of more than one word is read, not dropped', () => {
+    // "Thojika Santhaseelan" is a current user. The pattern used to allow one
+    // word only, so every movement they recorded silently disappeared.
+    const move = parseTransferLine(
+      'UK stock changes: Unit3(Quantity) from 10 to 60,Unit4(unit3) from 50 to 0 ' +
+        '(Informed by Suthana akka) by Thojika Santhaseelan on 2026-07-23 via inventory CSV.',
+      units,
+    );
+
+    assert.ok(move, 'a movement recorded by a two-word name was dropped');
+    assert.equal(move.recordedBy, 'Thojika Santhaseelan');
+    assert.equal(move.raisedOn, '2026-07-23');
+    assert.equal(move.note, 'Informed by Suthana akka');
+  });
+
+  test('a "by" inside the note is not taken for the person who applied it', () => {
+    const move = parse('balanced two-leg move, destination leg written first');
+    assert.equal(move.recordedBy, 'mithusha');
+
+    const noted = parseTransferLine(
+      'UK stock changes: Unit3(Quantity) from 0 to 5,Unit18(unit1) from 5 to 0 ' +
+        '(moved by van on 2026-01-01) by mithusha on 2026-01-02 via inventory CSV.',
+      units,
+    );
+    assert.equal(noted.recordedBy, 'mithusha');
+    assert.equal(noted.raisedOn, '2026-01-02');
+  });
+});
+
+describe('joinWrappedEntry', () => {
+  // Real: the note was typed across two lines, so the first line alone has no
+  // "by <user> on <date>" and a genuine 60-unit move was lost.
+  const opening =
+    'UK stock changes: Unit3(Quantity) from -42 to 4,Unit18(unit1) from 60 to 0 (Informed by 0 in Unit 18 - Nanthu';
+  const closing = '4 in Unit 3 - Nanthi Akka) by Slakshika on 2026-01-09 via inventory CSV.';
+
+  test('continues an entry whose note bracket is still open', () => {
+    const move = parseTransferLine(joinWrappedEntry(opening, [closing, 'Product was editted by x']), units);
+
+    assert.ok(move, 'the wrapped movement is still dropped');
+    assert.equal(move.fromWarehouseId, '6');
+    assert.equal(move.toWarehouseId, '1');
+    assert.equal(move.quantityOut, 60);
+    assert.equal(move.recordedBy, 'Slakshika');
+    assert.equal(move.note, 'Informed by 0 in Unit 18 - Nanthu 4 in Unit 3 - Nanthi Akka');
+  });
+
+  test('follows a note over more than one extra line', () => {
+    const joined = joinWrappedEntry('UK stock changes: Unit3(Quantity) from 0 to 5,Unit4(unit3) from 5 to 0 (first', [
+      'second',
+      'third) by Nishani on 2025-01-14 via inventory CSV.',
+    ]);
+    assert.equal(parseTransferLine(joined, units)?.note, 'first second third');
+  });
+
+  test('leaves a complete line exactly as it was', () => {
+    const complete = RAW_HISTORY_LINES[0].line;
+    assert.equal(joinWrappedEntry(complete, ['anything']), complete);
+  });
+
+  test('never runs into the next stock-change entry', () => {
+    const next = RAW_HISTORY_LINES[1].line;
+    assert.equal(joinWrappedEntry(opening, [next]), opening);
+  });
+
+  test('an open bracket that never closes is left alone rather than guessed at', () => {
+    assert.equal(joinWrappedEntry(opening, ['more', 'and more']), opening);
+    assert.equal(joinWrappedEntry(opening), opening);
+    assert.equal(joinWrappedEntry(opening, null), opening);
+  });
+
+  test('extractTransfers uses the following lines it is handed', () => {
+    const found = extractTransfers([{ sku: '12UK3P10A', line: opening, following: [closing] }], UK_WAREHOUSES);
+    assert.equal(found.length, 1);
+    assert.equal(found[0].sku, '12UK3P10A');
   });
 });
 

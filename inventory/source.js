@@ -413,8 +413,15 @@ export function stockLines() {
 /** One leg of a stock-change line: "Unit4(unit3) from 179 to 0". */
 const LEG_PATTERN = /(Unit\d+)\(([^)]*)\)\s+from\s+(-?\d*)\s+to\s+(-?\d+)/g;
 
-/** The trailing "by <user> on <date>" every applied change carries. */
-const APPLIED_PATTERN = /\bby\s+([A-Za-z0-9_.@-]+)\s+on\s+(\d{4}-\d{2}-\d{2})/g;
+/**
+ * The trailing "by <user> on <date>" every applied change carries.
+ *
+ * The name may be more than one word - "by Thojika Santhaseelan on 2026-07-22"
+ * is a real, current user - so it is not limited to one token. It cannot cross
+ * a bracket, which is what stops a "by" inside the note ("(Informed by Nanthini
+ * akka) by ...") being read as the person who applied the change.
+ */
+const APPLIED_PATTERN = /\bby\s+([^()\r\n]+?)\s+on\s+(\d{4}-\d{2}-\d{2})/g;
 
 /** The note in brackets, immediately before "by <user>". */
 const NOTE_PATTERN = /\(([^()]*)\)\s*by\s/;
@@ -466,7 +473,7 @@ export function transferReference(event) {
     event.note,
     event.fromWarehouseId,
     event.toWarehouseId,
-  ].join(' ');
+  ].join('\u0000');
 
   return `TR-${createHash('sha1').update(material).digest('hex').slice(0, 10).toUpperCase()}`;
 }
@@ -539,6 +546,46 @@ export function parseTransferLine(text, units) {
   };
 }
 
+/** How a bracket balance is kept: opening brackets less closing ones. */
+const bracketDepth = (text) =>
+  (text.match(/\(/g) ?? []).length - (text.match(/\)/g) ?? []).length;
+
+/**
+ * Put back together a log entry whose note was typed across several lines.
+ *
+ * The log is split into entries on line breaks, but a note is free text and
+ * staff sometimes press Enter inside it:
+ *
+ *   UK stock changes: Unit3(Quantity) from -42 to 4,Unit18(unit1) from 60 to 0 (Informed by 0 in Unit 18 - Nanthu
+ *   4 in Unit 3 - Nanthi Akka) by Slakshika on 2026-01-09 via inventory CSV.
+ *
+ * Read on its own, the first line has no "by <user> on <date>" and a real
+ * transfer was silently dropped. An entry whose note bracket is still open at
+ * the end of the line is therefore continued onto the lines after it until the
+ * bracket closes. Anything else is handed back untouched - so is an entry whose
+ * bracket never closes, or that would run into the next stock-change entry,
+ * because guessing where it ends would be worse than leaving it unread.
+ *
+ * @param {string} line                   One line of the log.
+ * @param {readonly string[]} [following] The lines after it, in order.
+ * @returns {string}
+ */
+export function joinWrappedEntry(line, following = []) {
+  const first = String(line ?? '');
+  if (bracketDepth(first) <= 0) return first;
+
+  let text = first;
+  for (const next of following ?? []) {
+    const part = String(next ?? '').trim();
+    if (part.startsWith('UK stock changes:') || part.startsWith('[')) break;
+
+    text = `${text} ${part}`;
+    if (bracketDepth(text) <= 0) return text;
+  }
+
+  return first;
+}
+
 /**
  * Turn the matching history lines into transfer rows.
  *
@@ -546,7 +593,9 @@ export function parseTransferLine(text, units) {
  * filters narrow. Rows produced by one event share a derived reference, and the
  * transfer detail page gathers them back up by it.
  *
- * @param {readonly {sku: string, line: string}[]} lines
+ * @param {readonly {sku: string, line: string, following?: string[]|null}[]} lines
+ *        `following` is the next few lines of the log, supplied only when the
+ *        line's note runs on past its end - see joinWrappedEntry().
  * @param {readonly object[]} warehouseList
  * @returns {object[]}
  */
@@ -555,7 +604,7 @@ export function extractTransfers(lines, warehouseList) {
   const found = [];
 
   for (const row of lines) {
-    const movement = parseTransferLine(row.line, units);
+    const movement = parseTransferLine(joinWrappedEntry(row.line, row.following ?? []), units);
     if (movement === null) continue;
 
     found.push(
@@ -585,19 +634,44 @@ export function extractTransfers(lines, warehouseList) {
  * than the whole log. Deciding which of those is actually a transfer happens in
  * parseTransferLine() above, where it can be read and tested.
  *
+ * A candidate line whose note bracket is still open at its end also brings the
+ * next three lines of the log with it, so a note typed across several lines can
+ * be put back together - see joinWrappedEntry(). Every other line brings none.
+ *
  * @returns {Promise<object[]>}
  */
 export function transfers() {
   return cached('transfers', async () =>
     extractTransfers(
+      // lead() rather than indexing an array of the lines: a subscript into a
+      // text[] walks the array from the start, which on the longest histories
+      // turned this read from seconds into minutes. Histories with no
+      // stock-change entry at all are skipped before anything is split.
       await rows(`
-        SELECT p.sku,
-               trim(l) AS line
-          FROM ${INVENTORY_SCHEMA}.product_history h
-          JOIN ${INVENTORY_SCHEMA}.products p
-            ON p.id = h.inventory_id AND p.inventory_bool
-         CROSS JOIN LATERAL regexp_split_to_table(coalesce(h.history, ''), E'[\\r\\n]+') l
-         WHERE trim(l) LIKE 'UK stock changes: Unit%'`),
+        WITH numbered AS (
+          SELECT p.sku,
+                 l.line,
+                 l.n,
+                 lead(l.line, 1) OVER entry AS next1,
+                 lead(l.line, 2) OVER entry AS next2,
+                 lead(l.line, 3) OVER entry AS next3
+            FROM ${INVENTORY_SCHEMA}.product_history h
+            JOIN ${INVENTORY_SCHEMA}.products p
+              ON p.id = h.inventory_id AND p.inventory_bool
+           CROSS JOIN LATERAL regexp_split_to_table(h.history, E'[\\r\\n]+')
+                 WITH ORDINALITY AS l(line, n)
+           WHERE h.history LIKE '%UK stock changes: Unit%'
+          WINDOW entry AS (PARTITION BY h.ctid ORDER BY l.n)
+        )
+        SELECT sku,
+               trim(line) AS line,
+               CASE
+                 WHEN length(line) - length(replace(line, '(', ''))
+                    > length(line) - length(replace(line, ')', ''))
+                 THEN ARRAY[next1, next2, next3]
+               END AS following
+          FROM numbered
+         WHERE trim(line) LIKE 'UK stock changes: Unit%'`),
       await warehouses(),
     ),
   );

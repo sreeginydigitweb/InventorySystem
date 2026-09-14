@@ -592,12 +592,20 @@ async function auditViewRoute(query) {
  * @returns {Promise<object>}
  */
 async function imageRoute(pathname) {
-  const sku = decodeURIComponent(pathname.slice('/images/'.length, -'.svg'.length));
+  // A malformed escape - /images/%E0%A4%A.svg - makes decodeURIComponent throw,
+  // which surfaced as a 500. It is simply not a SKU, so it gets the neutral
+  // placeholder like any other unknown one.
+  let sku = null;
+  try {
+    sku = decodeURIComponent(pathname.slice('/images/'.length, -'.svg'.length));
+  } catch {
+    sku = null;
+  }
 
   return {
     status: 200,
     contentType: 'image/svg+xml; charset=utf-8',
-    body: renderThumbnailSvg(await findProduct(sku)),
+    body: renderThumbnailSvg(sku === null ? null : await findProduct(sku)),
   };
 }
 

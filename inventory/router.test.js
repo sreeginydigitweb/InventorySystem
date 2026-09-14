@@ -953,6 +953,14 @@ describe('thumbnail route', () => {
     assert.match(response.body, /<svg/);
     assert.equal(response.body.includes('smart-inventory-control'), false);
   });
+
+  test('a malformed escape in the path is a placeholder, not a server error', async () => {
+    // decodeURIComponent throws on "%A" followed by a non-hex character, and
+    // that used to escape as a 500.
+    const response = await get('/images/%E0%A4%A.svg');
+    assert.equal(response.status, 200);
+    assert.match(response.body, /<svg/);
+  });
 });
 
 describe('unknown paths', () => {

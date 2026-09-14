@@ -12,8 +12,8 @@
  *    member of staff can type is escaped before it reaches a page.
  *
  * 2. There is exactly one script in the system, and it does one thing.
- *    /filters.js submits a list screen's filter bar when one of its controls
- *    changes, which is what makes the filters apply without an Apply button.
+ *    /filters.js applies a list screen's filter bar when one of its controls
+ *    changes, which is why the bar's Apply button is only shown without it.
  *    It is served from this origin, so the CSP allows script-src 'self' and
  *    nothing else - no inline handler, no CDN, no dependency. Filtering itself
  *    still happens on the server from query-string parameters, so a filtered
@@ -190,7 +190,12 @@ const STYLES = `
      table containers below ever scroll sideways. */
   img, svg { max-width: 100%; }
   header.masthead { background: #22303f; color: #fff; padding: .9rem var(--gutter) .1rem; }
+  /* Title on the left, today's date on the right, on one line. When the two do
+     not fit side by side - a narrow phone - the date wraps underneath and
+     margin-left: auto keeps it against the right-hand edge. */
+  header.masthead .masthead-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: .15rem 1rem; }
   header.masthead .title { font-size: 1.05rem; font-weight: 600; letter-spacing: .01em; }
+  header.masthead .today { margin-left: auto; font-size: .85rem; color: #cbd5e0; white-space: nowrap; }
   nav { display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .75rem; }
   nav a {
     color: #cbd5e0; text-decoration: none; font-size: .88rem;
@@ -404,6 +409,7 @@ const STYLES = `
   @media (max-width: 400px) {
     :root { --gutter: .85rem; }
     nav a { font-size: .8rem; padding: .5rem .45rem; }
+    header.masthead .today { font-size: .8rem; }
     .tile .value { font-size: 1.5rem; }
   }
 
@@ -546,6 +552,34 @@ const STYLES = `
   }
 `;
 
+const WEEKDAYS = Object.freeze(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']);
+const MONTHS = Object.freeze([
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+]);
+
+/**
+ * A date as it is shown in the masthead: "Monday, 14 September 2026".
+ *
+ * Built from the date's own parts rather than toLocaleDateString, whose
+ * punctuation depends on the ICU data Node ships with ("Monday 14 September
+ * 2026" on some versions, with the comma on others). The day is two digits, as
+ * in Weekday, DD Month YYYY. The server's local calendar date is used.
+ *
+ * @param {Date} date
+ * @returns {string}
+ */
+export function formatHeaderDate(date) {
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${WEEKDAYS[date.getDay()]}, ${day} ${MONTHS[date.getMonth()]} ${date.getFullYear()}`;
+}
+
+/** The same date as a machine-readable YYYY-MM-DD, for <time datetime>. */
+function isoDate(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
 /**
  * Wrap page content in the shared shell: masthead, navigation, footer.
  *
@@ -554,9 +588,12 @@ const STYLES = `
  * @param {string} options.activePath Nav item to mark as current.
  * @param {string} options.lede       One line under the heading.
  * @param {string} options.body       Page markup.
+ * @param {Date} [options.today]      The date shown in the masthead. Every page
+ *                                    is rendered per request, so the default -
+ *                                    now - is always the current date.
  * @returns {string} A complete HTML document.
  */
-export function layout({ title, activePath, lede = '', body, flash = null }) {
+export function layout({ title, activePath, lede = '', body, flash = null, today = new Date() }) {
   const nav = NAV_ITEMS.map((item) => {
     const current = item.path === activePath ? ' aria-current="page"' : '';
     return `<a href="${escapeHtml(item.path)}"${current}>${escapeHtml(item.label)}</a>`;
@@ -577,7 +614,10 @@ export function layout({ title, activePath, lede = '', body, flash = null }) {
 </head>
 <body>
   <header class="masthead">
-    <div class="title">Smart Inventory Control</div>
+    <div class="masthead-top">
+      <div class="title">Smart Inventory Control</div>
+      <time class="today" datetime="${escapeHtml(isoDate(today))}">${escapeHtml(formatHeaderDate(today))}</time>
+    </div>
     <nav>${nav}</nav>
   </header>
   <main>
@@ -594,8 +634,8 @@ ${banner}${body}
 /**
  * Build the filter bar from a list of controls.
  *
- * The bar is one ordinary GET form. There is no Apply button: /filters.js
- * submits the form the moment anything in it changes, so choosing a value
+ * The bar is one ordinary GET form. /filters.js applies it the moment anything
+ * in it changes, or when Enter is pressed in the search box, so choosing a value
  * applies it immediately.
  *
  * Each group is a plain <select>. Not a custom widget, not a panel of
@@ -1770,7 +1810,11 @@ export function renderTransferViewPage({ transfer, flash = null }) {
   const head =
     '<th>SKU</th><th>Product</th><th class="num">Qty</th><th class="num">Out</th><th class="num">In</th><th>Status</th><th class="row-actions">Action</th>';
 
-  const extra = `    <h2>${escapeHtml(`${transfer.skuCount === 1 ? '1 SKU line' : `${number(transfer.skuCount)} SKU lines`}`)}</h2>
+  // Counts the lines in the table below, not distinct SKUs: the same SKU can be
+  // edited twice in one event, and a heading of "3 SKU lines" over five rows
+  // reads as rows that should not be there.
+  const lineCount = transfer.lines.length;
+  const extra = `    <h2>${escapeHtml(lineCount === 1 ? '1 SKU line' : `${number(lineCount)} SKU lines`)}</h2>
 ${tableOrEmpty(lines, head, 'This transfer has no lines.')}`;
 
   return renderRecordPage({
@@ -1962,6 +2006,21 @@ export function renderFilterScript() {
   // this class never lands, and the button stays on screen.
   document.documentElement.className += " js";
 
+  // Read the bar, do not rewrite it. A filter left at "All" is simply left
+  // out of the URL; it is never disabled, and it stays usable for the next
+  // thing the user wants to narrow by.
+  function apply(form) {
+    var parts = [];
+    for (var i = 0; i < form.elements.length; i += 1) {
+      var field = form.elements[i];
+      if (!field.name || field.value === "") continue;
+      parts.push(encodeURIComponent(field.name) + "=" + encodeURIComponent(field.value));
+    }
+
+    var action = form.getAttribute("action") || location.pathname;
+    location.assign(parts.length ? action + "?" + parts.join("&") : action);
+  }
+
   document.addEventListener("change", function (event) {
     var control = event.target;
     if (!control || !control.form) return;
@@ -1972,18 +2031,18 @@ export function renderFilterScript() {
     var tag = control.tagName;
     if (tag !== "SELECT" && !(tag === "INPUT" && control.type === "search")) return;
 
-    // Read the bar, do not rewrite it. A filter left at "All" is simply left
-    // out of the URL; it is never disabled, and it stays usable for the next
-    // thing the user wants to narrow by.
-    var parts = [];
-    for (var i = 0; i < form.elements.length; i += 1) {
-      var field = form.elements[i];
-      if (!field.name || field.value === "") continue;
-      parts.push(encodeURIComponent(field.name) + "=" + encodeURIComponent(field.value));
-    }
+    apply(form);
+  });
 
-    var action = form.getAttribute("action") || location.pathname;
-    location.assign(parts.length ? action + "?" + parts.join("&") : action);
+  // Enter in the search box submits the form. Take that over too, so the URL
+  // is the same clean one a dropdown change produces - and so pressing Enter
+  // on a term that has not changed still runs the search.
+  document.addEventListener("submit", function (event) {
+    var form = event.target;
+    if (!form || !form.classList || !form.classList.contains("filters")) return;
+
+    event.preventDefault();
+    apply(form);
   });
 })();
 `;

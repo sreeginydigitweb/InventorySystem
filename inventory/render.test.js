@@ -15,7 +15,9 @@ import {
   formatDifference,
   issueClass,
   layout,
+  formatHeaderDate,
   renderFilterScript,
+  renderTransferViewPage,
   renderNotFoundPage,
   renderThumbnailSvg,
   statusClass,
@@ -140,6 +142,31 @@ describe('layout', () => {
     const bare = layout({ title: 'T', activePath: '/', body: '' });
     assert.equal(bare.includes('class="lede"'), false);
   });
+
+  test('shows the date it is given in the masthead, beside the title', () => {
+    const dated = layout({ title: 'T', activePath: '/', body: '', today: new Date(2026, 8, 14) });
+    const masthead = /<header class="masthead">([\s\S]*?)<\/header>/.exec(dated)[1];
+
+    assert.match(
+      masthead,
+      /<div class="masthead-top">\s*<div class="title">Smart Inventory Control<\/div>\s*<time class="today" datetime="2026-09-14">Monday, 14 September 2026<\/time>\s*<\/div>/,
+    );
+    assert.equal((dated.match(/<header/g) ?? []).length, 1, 'a second header was added');
+  });
+
+  test('defaults to the current date rather than a fixed one', () => {
+    const now = new Date();
+    assert.ok(page.includes(`>${formatHeaderDate(now)}</time>`), 'the masthead is not showing today');
+  });
+});
+
+describe('formatHeaderDate', () => {
+  test('is Weekday, DD Month YYYY', () => {
+    assert.equal(formatHeaderDate(new Date(2026, 8, 14)), 'Monday, 14 September 2026');
+    assert.equal(formatHeaderDate(new Date(2027, 0, 1)), 'Friday, 01 January 2027');
+    assert.equal(formatHeaderDate(new Date(2024, 1, 29)), 'Thursday, 29 February 2024');
+    assert.equal(formatHeaderDate(new Date(2026, 11, 31)), 'Thursday, 31 December 2026');
+  });
 });
 
 describe('renderNotFoundPage', () => {
@@ -192,6 +219,46 @@ describe('renderFilterScript', () => {
     // The class only lands if this file actually ran. With scripting off, or
     // if the file fails to load, the button stays and the bar still works.
     assert.match(code, /documentElement\.className/);
+  });
+
+  test('takes over the submit that Enter in the search box causes', () => {
+    // Typing a term and pressing Enter submits the form rather than changing a
+    // dropdown. Handled here, so it lands on the same clean URL and still
+    // searches when the term has not changed since the page loaded.
+    assert.match(code, /addEventListener\("submit"/);
+    assert.match(code, /preventDefault\(\)/);
+  });
+});
+
+describe('renderTransferViewPage', () => {
+  /** One event in which the same SKU was edited twice, plus a second SKU. */
+  const line = (sku, quantity) => ({
+    id: 'TR-REPEAT0001',
+    sku,
+    productName: `Product ${sku}`,
+    fromWarehouseId: '8',
+    toWarehouseId: '1',
+    fromWarehouseName: 'UK Unit4',
+    toWarehouseName: 'UK Unit3',
+    quantity,
+    quantityOut: quantity,
+    quantityIn: quantity,
+    status: 'Received',
+    raisedOn: '2025-05-08',
+    recordedBy: 'manoranjini',
+    note: 'Low stock counting',
+  });
+  const lines = [line('WCB4BS', 21), line('WCB4BS', 19), line('WCB6BM', 20)];
+
+  test('the heading counts the lines the table lists, not distinct SKUs', () => {
+    // Real data has events where one SKU was edited twice. The heading used to
+    // count distinct SKUs, so it read "2 SKU lines" above three rows.
+    const page = renderTransferViewPage({
+      transfer: { ...lines[0], lines, skuCount: 2, quantity: 60, quantityOut: 60, quantityIn: 60 },
+    });
+
+    assert.match(page, /<h2>3 SKU lines<\/h2>/);
+    assert.equal((page.match(/<td class="sku">/g) ?? []).length, 3);
   });
 });
 

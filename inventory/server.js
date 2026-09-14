@@ -79,23 +79,35 @@ function readForm(req) {
  * in an onchange attribute - an inline handler would need the CSP relaxed far
  * further than a same-origin file does.
  *
- * img-src is this origin plus the one host the source database stores product
+ * img-src is this origin plus the hosts the source database stores product
  * photographs on. Those URLs are real data - the business's own product images,
  * exactly as ledsone records them - so they are shown rather than replaced with
- * a placeholder, and the host is named explicitly rather than allowing https:
+ * a placeholder, and the hosts are named explicitly rather than allowing https:
  * generally. A SKU with no photograph falls back to the SVG thumbnail this
  * server draws, which is same-origin.
  *
- * form-action is 'none'. The application has no forms: the source database is
- * read-only to it, so there is nothing to submit anywhere.
+ * form-action is 'self'. The only form in the application is the list screens'
+ * filter bar, a GET to its own screen: pressing Enter in the search box, or the
+ * Apply button when scripting is off, submits it. With 'none' the browser
+ * blocked both, so a typed search did nothing. Nothing is ever POSTed - the
+ * source database is read-only to this application.
  */
 
-/** The host ledsone stores product images on. */
-export const IMAGE_HOST = 'https://sin1.contabostorage.com';
+/**
+ * The hosts ledsone stores product images on.
+ *
+ * Two, not one: six catalogue SKUs (the CRSP212R48 / CRSP112R48 / CRSP217R66
+ * ranges) have their main image on dashboard.digitweblk.com, and with only the
+ * first host allowed those rendered as broken images.
+ */
+export const IMAGE_HOSTS = Object.freeze([
+  'https://sin1.contabostorage.com',
+  'https://dashboard.digitweblk.com',
+]);
 
 const SECURITY_HEADERS = Object.freeze({
   'content-security-policy':
-    `default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' ${IMAGE_HOST}; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`,
+    `default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' ${IMAGE_HOSTS.join(' ')}; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
 });

@@ -108,8 +108,9 @@ each of the six areas in detail.
 
 Data, business logic and rendering are kept apart. Filtering runs on the server
 from the query string; the only client-side JavaScript is `/filters.js`, a
-single same-origin file that submits a filter bar when one of its dropdowns
-changes, so the filters need no Apply button.
+single same-origin file that applies a filter bar as soon as a dropdown changes
+or Enter is pressed in the search box. With scripting off, the bar shows an
+Apply button instead, which submits the same `GET` form.
 
 | Path | Responsibility |
 | --- | --- |
