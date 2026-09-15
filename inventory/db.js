@@ -138,13 +138,6 @@ export const SUPPLIERS_SCHEMA = schemaName('DB_SUPPLIERS_SCHEMA', 'suppliers');
 /** Sales orders, used for units sold in the last 90 days. */
 export const ORDERS_SCHEMA = schemaName('DB_ORDERS_SCHEMA', 'order_management');
 
-/** Every schema this application is allowed to read, for the startup check. */
-export const READ_SCHEMAS = Object.freeze([
-  INVENTORY_SCHEMA,
-  SUPPLIERS_SCHEMA,
-  ORDERS_SCHEMA,
-]);
-
 /**
  * Build the pool configuration, complaining clearly about anything missing.
  *
@@ -183,10 +176,11 @@ function poolConfig() {
     ssl: wantsTls ? { rejectUnauthorized: false } : false,
     // Deliberately small. The database role this application connects as is
     // shared with the other applications on this server, and the role has a
-    // connection limit covering all of them together - so a pool sized for
+    // connection limit covering all of them together (25) - so a pool sized for
     // this application alone can exhaust the role and lock everyone out,
-    // including itself at startup.
-    max: Number(setting('DB_POOL_MAX') || 3),
+    // including itself at startup. Two is the smallest that still lets a page's
+    // reads overlap; the rest queue on the pool rather than opening more.
+    max: Number(setting('DB_POOL_MAX') || 2),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 15_000,
     application_name: 'smart-inventory-control (read-only)',

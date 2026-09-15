@@ -35,23 +35,6 @@
  * @property {readonly string[]} approvedWarehouses Sites this SKU may be held at.
  */
 
-/** Product categories, in display order. */
-export const CATEGORIES = Object.freeze([
-  'Ceiling Lights',
-  'Outdoor Lighting',
-  'Bulbs',
-  'Fittings & Spares',
-  'Lamps',
-]);
-
-/** Suppliers used in the dummy catalogue. All invented. */
-export const SUPPLIERS = Object.freeze([
-  'Northgate Lighting Ltd',
-  'Halden Electrical Supplies',
-  'Verity Home Fittings',
-  'Mercer & Roe Components',
-]);
-
 /**
  * Thumbnail path for a SKU. The image is generated as an SVG by the server, so
  * there is no binary asset in the repository and nothing is fetched over the
@@ -194,16 +177,9 @@ const catalogue = [
 ];
 
 /**
- * The live catalogue for the running session.
- *
- * The array itself is not frozen: store.js adds, replaces and removes entries
- * in place when staff use the Add/Edit/Delete screens, and because the binding
- * never changes every module that imported it sees those edits immediately.
- * Each record stays frozen, so an edit replaces a product rather than quietly
- * mutating one that another screen is already holding.
- *
- * Nothing is written to disk. The catalogue returns to exactly the list above
- * when the server restarts.
+ * The catalogue the tests run against, handed to store.js through
+ * memorySource(). Each record is frozen, so no test can quietly change one that
+ * another test is relying on. Nothing is written anywhere.
  *
  * @type {Product[]}
  */
@@ -214,27 +190,3 @@ export const PRODUCTS = catalogue.map((product) =>
     approvedWarehouses: Object.freeze([...product.approvedWarehouses]),
   }),
 );
-
-/**
- * Look up a product by SKU.
- *
- * Returns null rather than throwing. A stock row may reference a SKU that is
- * not in the catalogue, and that is a condition the mismatch rule reports.
- *
- * @param {string} sku
- * @returns {Product|null}
- */
-export function findProduct(sku) {
-  return PRODUCTS.find((product) => product.sku === sku) ?? null;
-}
-
-/**
- * Display name for a SKU, falling back to a clear label when the SKU is not in
- * the catalogue at all.
- *
- * @param {string} sku
- * @returns {string}
- */
-export function productName(sku) {
-  return findProduct(sku)?.name ?? 'Unknown SKU';
-}

@@ -12,7 +12,7 @@
  *   There is no transfer reference in the source, so `id` is DERIVED from the
  *   event - date, who recorded it, the reason and the two warehouses. Rows
  *   sharing an id are the SKUs that moved together in one edit. TR-GROUP01
- *   below carries three of them, because 303 of the 776 real transfers move
+ *   below carries three of them, because hundreds of real transfers move
  *   more than one SKU and a single-SKU fixture would never exercise that.
  *
  *   There is no Pending or In Transit. Every record is a movement already

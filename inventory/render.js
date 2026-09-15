@@ -11,9 +11,10 @@
  *    The data comes from PostgreSQL, so the rule is not optional: anything a
  *    member of staff can type is escaped before it reaches a page.
  *
- * 2. There is exactly one script in the system, and it does one thing.
- *    /filters.js applies a list screen's filter bar when one of its controls
- *    changes, which is why the bar's Apply button is only shown without it.
+ * 2. There is exactly one script in the system. /filters.js applies a list
+ *    screen's filter bar when one of its controls changes, which is why the
+ *    bar's Apply button is only shown without it, and swaps a product image
+ *    that fails to load for that SKU's placeholder thumbnail.
  *    It is served from this origin, so the CSP allows script-src 'self' and
  *    nothing else - no inline handler, no CDN, no dependency. Filtering itself
  *    still happens on the server from query-string parameters, so a filtered
@@ -21,14 +22,10 @@
  *    with scripting disabled.
  */
 
-/** Shown wherever a value is absent. */
-export const UNKNOWN_LABEL = 'Unknown';
-
 /**
  * Shown wherever the SOURCE DATABASE has no value for a field.
  *
- * Deliberately different from UNKNOWN_LABEL, and deliberately not a blank cell
- * or a zero. "Not recorded" says the business has not captured this, which is
+ * Deliberately not a blank cell or a zero. "Not recorded" says the business has not captured this, which is
  * the true answer for a SKU with no listing, no purchase order or no sales -
  * and it can never be mistaken for a figure.
  */
@@ -43,15 +40,6 @@ const ESCAPES = {
 };
 
 /**
- * Escape a value for interpolation into HTML text or an attribute.
- *
- * Ampersand is replaced in the same pass as the rest, so entities cannot be
- * double-built. Applied to every dynamic value without exception.
- *
- * @param {unknown} value
- * @returns {string}
- */
-/**
  * The View icon used in every Action column.
  *
  * Inline SVG rather than an image or a font: the page loads nothing external,
@@ -65,6 +53,15 @@ const ICON_VIEW =
   '<path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z"/>' +
   '<circle cx="12" cy="12" r="3"/></svg>';
 
+/**
+ * Escape a value for interpolation into HTML text or an attribute.
+ *
+ * Ampersand is replaced in the same pass as the rest, so entities cannot be
+ * double-built. Applied to every dynamic value without exception.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
 export function escapeHtml(value) {
   if (value === null || value === undefined) {
     return '';
@@ -267,6 +264,9 @@ const STYLES = `
     background: #fff; border: 1px solid var(--line); border-radius: 7px;
     padding: .8rem .9rem; margin: 0 0 1rem;
   }
+  /* A list screen has no line of description under its heading, so the filter
+     bar keeps its own distance from the heading instead of sitting against it. */
+  main > h1 + .filters { margin-top: .8rem; }
   .filters .field { display: flex; flex-direction: column; gap: .28rem; min-width: 0; max-width: 100%; }
   .filters .caption { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
   .filters input[type="search"] {
@@ -414,11 +414,10 @@ const STYLES = `
   }
 
   /* ======================================================================== */
-  /* Records: the add, view, edit and delete screens                          */
+  /* Record view screens                                                      */
   /* ======================================================================== */
 
-  /* One button style, used for links and submits alike so an Add link and a
-     Save button are the same object on screen. */
+  /* The navigation buttons above a record - "Back to products" and the like. */
   .btn {
     display: inline-block; font: inherit; font-size: .88rem; line-height: 1.4;
     text-decoration: none; text-align: center; cursor: pointer;
@@ -429,18 +428,15 @@ const STYLES = `
   .btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
   .btn.secondary { background: #fff; color: var(--accent); }
   .btn.secondary:hover { background: #eef4fb; color: var(--accent); border-color: var(--accent); }
-  .btn.danger { background: var(--bad-fg); border-color: var(--bad-fg); }
-  .btn.danger:hover { background: #8c1c1c; border-color: #8c1c1c; }
 
   .page-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: 0 0 1rem; }
 
-  /* The two dashboard summaries.
+  /* The two dashboard summaries share one column layout.
 
      Every row is a single line - a badge, a count and a link - so they are
      centred against each other rather than top-aligned. The list screens keep
      the top alignment they need, because their cells wrap onto several lines
-     and a reason has to start level with the SKU beside it. */
-  /* The two dashboard summaries share one column layout.
+     and a reason has to start level with the SKU beside it.
 
      table-layout: fixed is what makes the <col> widths binding rather than a
      hint, so Count and Action sit at the same horizontal position on both
@@ -483,12 +479,6 @@ const STYLES = `
                  padding: .55rem .7rem; border-left: 3px solid #c8cdd4;
                  background: #f5f7fa; border-radius: 0 4px 4px 0; }
 
-  .flash { border: 1px solid; border-radius: 5px; padding: .6rem .8rem; margin: 0 0 1rem;
-           font-size: .88rem; overflow-wrap: break-word; }
-  .flash.ok { background: var(--ok-bg); color: var(--ok-fg); border-color: #bfe0c9; }
-  .flash.warn { background: var(--warn-bg); color: var(--warn-fg); border-color: #ecd9a8; }
-  .flash.bad { background: var(--bad-bg); color: var(--bad-fg); border-color: #eec4c4; }
-
   /* View screens */
   .detail { background: #fff; border: 1px solid var(--line); border-radius: 7px;
             padding: 0 1rem; margin: 0 0 1.25rem; }
@@ -501,47 +491,9 @@ const STYLES = `
   .detail dd img.thumb { width: 56px; height: 56px; }
   .detail dd .derived { font-size: .78rem; color: var(--muted); display: block; margin-top: .15rem; }
 
-  /* Add and edit forms */
-  form.record { background: #fff; border: 1px solid var(--line); border-radius: 7px;
-                padding: 1rem; margin: 0 0 1.25rem; }
-  form.record .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
-  form.record .field { display: flex; flex-direction: column; gap: .3rem; min-width: 0; }
-  form.record .field.wide { grid-column: 1 / -1; }
-  form.record label.caption { font-size: .75rem; text-transform: uppercase;
-                              letter-spacing: .04em; color: var(--muted); }
-  form.record input, form.record select, form.record textarea {
-    font: inherit; color: var(--ink); background: #fff; width: 100%; max-width: 100%;
-    min-height: 38px; border: 1px solid var(--line); border-radius: 4px; padding: .35rem .5rem;
-  }
-  form.record textarea { min-height: 5.5rem; resize: vertical; line-height: 1.5; }
-  form.record input[readonly] { background: #f1f3f5; color: var(--muted); }
-  form.record input:focus-visible, form.record select:focus-visible, form.record textarea:focus-visible {
-    outline: 2px solid var(--accent); outline-offset: 1px;
-  }
-  form.record .hint { font-size: .78rem; color: var(--muted); overflow-wrap: break-word; }
-  form.record .field.bad input, form.record .field.bad select, form.record .field.bad textarea {
-    border-color: var(--bad-fg);
-  }
-  form.record .field-error { font-size: .78rem; color: var(--bad-fg); overflow-wrap: break-word; }
-  form.record .options { display: flex; flex-wrap: wrap; gap: .45rem .9rem; padding-top: .15rem; }
-  form.record .options label { display: flex; align-items: center; gap: .4rem;
-                               font-size: .88rem; color: var(--ink); }
-  form.record .options input { width: auto; min-height: 0; }
-  form.record .buttons { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center;
-                         margin-top: 1.1rem; }
-  .errors { background: var(--bad-bg); border: 1px solid #eec4c4; border-left: 3px solid var(--bad-fg);
-            border-radius: 5px; padding: .7rem .9rem; margin: 0 0 1rem; color: var(--bad-fg); font-size: .86rem; }
-  .errors ul { margin: .35rem 0 0; padding-left: 1.1rem; }
-  .errors li { margin-top: .15rem; overflow-wrap: break-word; }
-
   @media (max-width: 767px) {
     /* Buttons share the row and stay a comfortable size for a thumb. */
-    .page-actions .btn, form.record .buttons .btn, form.record .buttons button {
-      flex: 1 1 auto; min-height: 44px;
-    }
-    form.record { padding: .85rem; }
-    form.record .grid { grid-template-columns: 1fr; gap: .8rem; }
-    form.record input, form.record select, form.record textarea { font-size: 16px; min-height: 42px; }
+    .page-actions .btn { flex: 1 1 auto; min-height: 44px; }
     /* Label above value rather than beside it: 13rem of label leaves nothing
        for the value on a phone. */
     .detail { padding: 0 .85rem; }
@@ -593,15 +545,11 @@ function isoDate(date) {
  *                                    now - is always the current date.
  * @returns {string} A complete HTML document.
  */
-export function layout({ title, activePath, lede = '', body, flash = null, today = new Date() }) {
+export function layout({ title, activePath, lede = '', body, today = new Date() }) {
   const nav = NAV_ITEMS.map((item) => {
     const current = item.path === activePath ? ' aria-current="page"' : '';
     return `<a href="${escapeHtml(item.path)}"${current}>${escapeHtml(item.label)}</a>`;
   }).join('');
-
-  const banner = flash
-    ? `    <p class="flash ${escapeHtml(flash.tone ?? 'ok')}">${escapeHtml(flash.message)}</p>\n`
-    : '';
 
   return `<!doctype html>
 <html lang="en">
@@ -623,7 +571,7 @@ export function layout({ title, activePath, lede = '', body, flash = null, today
   <main>
     <h1>${escapeHtml(title)}</h1>
     ${lede ? `<p class="lede">${escapeHtml(lede)}</p>` : ''}
-${banner}${body}
+${body}
     <footer>Smart Inventory Control</footer>
   </main>
 </body>
@@ -712,15 +660,6 @@ function renderFilters({ action, controls, showReset }) {
 }
 
 /**
- * Wrap table markup, or show an empty-state message when there is nothing to
- * show.
- *
- * @param {string} rows
- * @param {string} head
- * @param {string} emptyMessage
- * @returns {string}
- */
-/**
  * What an empty table says.
  *
  * When a search is running, the term is quoted back. "No issues match these
@@ -737,6 +676,15 @@ function noMatches(noun, search) {
     : `No ${noun} match these filters.`;
 }
 
+/**
+ * Wrap table markup, or show an empty-state message when there is nothing to
+ * show.
+ *
+ * @param {string} rows
+ * @param {string} head
+ * @param {string} emptyMessage
+ * @returns {string}
+ */
 function tableOrEmpty(rows, head, emptyMessage) {
   if (!rows) {
     return `    <p class="empty">${escapeHtml(emptyMessage)}</p>`;
@@ -756,8 +704,8 @@ ${rows}
 /**
  * A whole number, grouped for reading.
  *
- * The figures are real now - sixty-eight thousand stock lines, not fourteen -
- * and an ungrouped 68237 is read wrong at a glance.
+ * The source holds tens of thousands of stock lines, and an ungrouped 68237 is
+ * read wrong at a glance.
  *
  * @param {number} value
  * @returns {string}
@@ -841,14 +789,9 @@ function sourceNote(text) {
 /* ========================================================================== */
 
 /*
- * Add, view, edit and delete look the same on all five screens, so they are
- * built once here rather than five times below. A screen supplies the rows or
- * the fields; everything about how they are laid out, escaped and made to work
- * on a phone lives in these four functions.
- *
- * There is still no client-side JavaScript. A delete is a GET to a confirmation
- * page followed by a POST from a form on it, so nothing destructive can happen
- * by following a link, and nothing depends on a confirm() dialog.
+ * The view pages look the same on all five screens, so their pieces are built
+ * once here rather than five times below. A screen supplies the rows; how they
+ * are laid out, escaped and made to work on a phone lives in these functions.
  */
 
 /**
@@ -895,6 +838,43 @@ function rowActions(links) {
 }
 
 /**
+ * The product image for a SKU, as every screen shows it.
+ *
+ * One function, so a thumbnail looks and behaves the same wherever a SKU is
+ * printed. The row hands in the image fields reports.js attached for its own
+ * SKU - `image` and `imagePlaceholder` - so the picture can only be that SKU's.
+ *
+ * The product name is the alt text. data-fallback carries the SKU's placeholder
+ * thumbnail: /filters.js puts it in place if the source image fails to load, so
+ * a broken image URL looks the same as a missing one. It is left off when the
+ * image already is the placeholder.
+ *
+ * @param {{image: string, imagePlaceholder?: string}} item
+ * @param {string} name   Product name.
+ * @param {number} [size] Thumbnail size in pixels: 40 in a table, 56 on a record page.
+ * @returns {string}
+ */
+function productThumb(item, name, size = 40) {
+  const fallback =
+    item.imagePlaceholder && item.imagePlaceholder !== item.image
+      ? ` data-fallback="${escapeHtml(item.imagePlaceholder)}"`
+      : '';
+
+  return `<img class="thumb" src="${escapeHtml(item.image)}" alt="${escapeHtml(name)}" width="${size}" height="${size}"${fallback}>`;
+}
+
+/**
+ * The Image cell in a table row, immediately after the SKU cell.
+ *
+ * @param {{image: string, imagePlaceholder?: string}} item
+ * @param {string} name  Product name.
+ * @returns {string}
+ */
+function imageCell(item, name) {
+  return `<td class="thumb-cell">${productThumb(item, name)}</td>`;
+}
+
+/**
  * One field on a view screen.
  *
  * A row is given either text, which is escaped, or html, which is not and is
@@ -937,7 +917,6 @@ function pageActions(buttons) {
  * @param {{label: string, href: string, tone?: string}[]} [options.actions]
  * @param {string} [options.note]
  * @param {string} [options.extra] Extra markup below the record, already built.
- * @param {object} [options.flash]
  * @returns {string}
  */
 export function renderRecordPage({
@@ -948,7 +927,6 @@ export function renderRecordPage({
   actions = [],
   note = '',
   extra = '',
-  flash = null,
 }) {
   const items = rows
     .map((row, index) => {
@@ -969,20 +947,8 @@ ${items}
     </div>
 ${extra}`;
 
-  return layout({ title, activePath, lede, body, flash });
+  return layout({ title, activePath, lede, body });
 }
-
-/**
- * One control on an add or edit form.
- *
- * @typedef {object} FormField
- * @property {string} kind    text | number | date | select | textarea | checkboxes | readonly
- * @property {string} name
- * @property {string} label
- * @property {string} [hint]
- * @property {boolean} [wide] Span both columns.
- * @property {{value: string, label: string}[]} [options] For select and checkboxes.
- */
 
 /* ========================================================================== */
 /* 1. DASHBOARD                                                               */
@@ -1059,7 +1025,7 @@ export function renderDashboardPage({ metrics, issueCounts, transferCounts }) {
    * One <colgroup> for both tables, so Count and Action start at the same
    * horizontal position on each. Left to size themselves, the two tables would
    * measure their own first column - "Warehouse/SKU Mismatch" against
-   * "In Transit" - and put the other two columns in different places, which
+   * "Received (Adjusted)" - and put the other two columns in different places, which
    * reads as two unrelated tables rather than two views of the same shape.
    *
    * The widths are enforced by table-layout: fixed in the stylesheet; without
@@ -1122,7 +1088,6 @@ export function renderProductsPage({
   category = '',
   supplier = '',
   stock = '',
-  flash = null,
 }) {
   const rows = products
     .map((product) => {
@@ -1131,8 +1096,8 @@ export function renderProductsPage({
         : '<span class="pill neutral">Inactive</span>';
 
       return `          <tr${product.active ? '' : ' class="flagged"'}>
-            <td class="thumb-cell"><img class="thumb" src="${escapeHtml(product.image)}" alt="" width="40" height="40"></td>
             <td class="sku">${escapeHtml(product.sku)}</td>
+            ${imageCell(product, product.name)}
             <td class="name">${escapeHtml(product.name)}</td>
             <td>${escapeHtml(product.category ?? NOT_IN_SOURCE)}</td>
             <td>${escapeHtml(product.supplier ?? NOT_IN_SOURCE)}</td>
@@ -1148,7 +1113,7 @@ export function renderProductsPage({
   // dashboard cards count - so a card and this column always say the same
   // thing about the same product.
   const head =
-    '<th>Image</th><th>SKU</th><th>Product Name</th><th>Category</th><th>Supplier</th><th>Listing</th><th class="num">Units held</th><th>Stock</th><th class="row-actions">Action</th>';
+    '<th>SKU</th><th>Image</th><th>Product</th><th>Category</th><th>Supplier</th><th>Listing</th><th class="num">Units held</th><th>Stock</th><th class="row-actions">Action</th>';
 
   const filters = renderFilters({
     action: '/products',
@@ -1189,9 +1154,7 @@ ${pager('/products', params, view)}`;
   return layout({
     title: 'Products',
     activePath: '/products',
-    lede: 'The product catalogue the stock figures are measured against.',
     body,
-    flash,
   });
 }
 
@@ -1212,7 +1175,6 @@ export function renderStockPage({
   search = '',
   threshold = 0,
   note = '',
-  flash = null,
 }) {
   const rows = lines
     .map((line) => {
@@ -1235,6 +1197,7 @@ export function renderStockPage({
 
       return `          <tr${rowClass}>
             <td class="sku">${escapeHtml(line.sku)}</td>
+            ${imageCell(line, line.productName)}
             <td class="name">${escapeHtml(line.productName)}</td>
             <td>${escapeHtml(line.warehouseName)}</td>
             <td class="num">${onHand}</td>
@@ -1255,7 +1218,7 @@ export function renderStockPage({
   // thing this column could hold is the application threshold repeated on every
   // one of sixty-eight thousand rows. It is stated once, above the table.
   const head =
-    '<th>SKU</th><th>Product</th><th>Warehouse</th><th class="num">Current</th><th class="num">Reserved</th><th class="num">Available</th><th>Status</th><th class="row-actions">Action</th>';
+    '<th>SKU</th><th>Image</th><th>Product</th><th>Warehouse</th><th class="num">Current</th><th class="num">Reserved</th><th class="num">Available</th><th>Status</th><th class="row-actions">Action</th>';
 
   const filters = renderFilters({
     action: '/stock',
@@ -1289,9 +1252,7 @@ ${pager('/stock', params, view)}`;
   return layout({
     title: 'Warehouse Stock',
     activePath: '/stock',
-    lede: 'Stock held by SKU and warehouse. Available is Current minus Reserved.',
     body,
-    flash,
   });
 }
 
@@ -1310,7 +1271,6 @@ export function renderIssuesPage({
   search = '',
   type = '',
   warehouseId = '',
-  flash = null,
 }) {
   const rows = issues
     .map((issue) => {
@@ -1324,6 +1284,7 @@ export function renderIssuesPage({
       return `          <tr${serious ? ' class="serious"' : ' class="flagged"'}>
             <td><span class="pill ${escapeHtml(issueClass(issue.type))}">${escapeHtml(issue.type)}</span></td>
             <td class="sku">${escapeHtml(issue.sku)}</td>
+            ${imageCell(issue, issue.productName)}
             <td class="name">${escapeHtml(issue.productName)}</td>
             <td>${escapeHtml(issue.warehouseName)}</td>
             <td class="num">${escapeHtml(number(issue.available))}</td>
@@ -1334,7 +1295,7 @@ export function renderIssuesPage({
     .join('\n');
 
   const head =
-    '<th>Issue</th><th>SKU</th><th>Product</th><th>Warehouse</th><th class="num">Available</th><th>Why it was raised</th><th class="row-actions">Action</th>';
+    '<th>Issue</th><th>SKU</th><th>Image</th><th>Product</th><th>Warehouse</th><th class="num">Available</th><th>Why it was raised</th><th class="row-actions">Action</th>';
 
   const filters = renderFilters({
     action: '/alerts',
@@ -1373,9 +1334,7 @@ ${pager('/alerts', params, view)}`;
   return layout({
     title: 'Alerts / Issues',
     activePath: '/alerts',
-    lede: 'Problems detected in the current stock position. Recalculated on every page load; nothing is stored.',
     body,
-    flash,
   });
 }
 
@@ -1408,13 +1367,13 @@ export function renderTransfersPage({
   status = '',
   fromWarehouseId = '',
   toWarehouseId = '',
-  flash = null,
 }) {
   const rows = transfers
     .map(
       (transfer) => `          <tr>
             <td class="sku">${escapeHtml(transfer.id)}</td>
             <td class="sku">${escapeHtml(transfer.sku)}</td>
+            ${imageCell(transfer, transfer.productName)}
             <td class="name">${escapeHtml(transfer.productName)}</td>
             <td>${escapeHtml(transfer.fromWarehouseName)}</td>
             <td>${escapeHtml(transfer.toWarehouseName)}</td>
@@ -1429,7 +1388,7 @@ export function renderTransfersPage({
     .join('\n');
 
   const head =
-    '<th>Reference</th><th>SKU</th><th>Product</th><th>From</th><th>To</th><th class="num">Qty</th><th>Status</th><th>Date</th><th>Recorded by</th><th>Reason</th><th class="row-actions">Action</th>';
+    '<th>Reference</th><th>SKU</th><th>Image</th><th>Product</th><th>From</th><th>To</th><th class="num">Qty</th><th>Status</th><th>Date</th><th>Recorded by</th><th>Reason</th><th class="row-actions">Action</th>';
 
   const filters = renderFilters({
     action: '/transfers',
@@ -1475,9 +1434,7 @@ ${pager('/transfers', params, view)}`;
   return layout({
     title: 'Transfers',
     activePath: '/transfers',
-    lede: 'Stock that has moved between warehouses, read from the source stock-change record.',
     body,
-    flash,
   });
 }
 
@@ -1495,7 +1452,6 @@ export function renderAuditPage({
   warehouseId = '',
   differencesOnly = false,
   note = '',
-  flash = null,
 }) {
   const rows = auditRows
     .map((row) => {
@@ -1505,6 +1461,7 @@ export function renderAuditPage({
 
       return `          <tr${row.matches ? '' : ' class="serious"'}>
             <td class="sku">${escapeHtml(row.sku)}</td>
+            ${imageCell(row, row.productName)}
             <td class="name">${escapeHtml(row.productName)}</td>
             <td>${escapeHtml(row.warehouseName)}</td>
             <td class="num">${escapeHtml(number(row.systemQuantity))}</td>
@@ -1518,7 +1475,7 @@ export function renderAuditPage({
     .join('\n');
 
   const head =
-    '<th>SKU</th><th>Product</th><th>Warehouse</th><th class="num">System Qty</th><th class="num">Counted Qty</th><th class="num">Difference</th><th>Result</th><th>Counted</th><th class="row-actions">Action</th>';
+    '<th>SKU</th><th>Image</th><th>Product</th><th>Warehouse</th><th class="num">System Qty</th><th class="num">Counted Qty</th><th class="num">Difference</th><th>Result</th><th>Counted</th><th class="row-actions">Action</th>';
 
   const filters = renderFilters({
     action: '/audit',
@@ -1555,7 +1512,6 @@ ${pager('/audit', params, view)}`;
     activePath: '/audit',
     lede: 'Physical counts compared against what the system expected.',
     body,
-    flash,
   });
 }
 
@@ -1582,7 +1538,7 @@ ${pager('/audit', params, view)}`;
  * @param {object} options
  * @returns {string}
  */
-export function renderProductViewPage({ product, stockLines, flash = null }) {
+export function renderProductViewPage({ product, stockLines }) {
   const summaryRows = stockLines
     .map(
       (line) => `          <tr>
@@ -1611,14 +1567,10 @@ ${summaryRows}
     title: product.name,
     activePath: '/products',
     lede: `Product ${product.sku}.`,
-    flash,
     actions: [{ label: 'Back to products', href: '/products', tone: 'secondary' }],
     rows: [
-      {
-        label: 'Image',
-        html: `<img class="thumb" src="${escapeHtml(product.image)}" alt="" width="56" height="56" loading="lazy">`,
-      },
       { label: 'SKU', text: product.sku },
+      { label: 'Image', html: productThumb(product, product.name, 56) },
       { label: 'Product name', text: product.name },
       { label: 'Category', text: product.category ?? NOT_IN_SOURCE },
       { label: 'Supplier', text: product.supplier ?? NOT_IN_SOURCE },
@@ -1666,7 +1618,7 @@ ${summaryRows}
  * @param {object} options
  * @returns {string}
  */
-export function renderStockViewPage({ line, issues, threshold = 0, note = '', flash = null }) {
+export function renderStockViewPage({ line, issues, threshold = 0, note = '' }) {
   const issueList =
     issues.length === 0
       ? '    <p class="empty">The rules find nothing wrong with this stock line.</p>'
@@ -1694,11 +1646,11 @@ ${issues
     title: `${line.sku} at ${line.warehouseName}`,
     activePath: '/stock',
     lede: 'One SKU held at one warehouse.',
-    flash,
     note,
     actions: [{ label: 'Back to stock', href: '/stock', tone: 'secondary' }],
     rows: [
       { label: 'SKU', text: line.sku },
+      { label: 'Image', html: productThumb(line, line.productName, 56) },
       { label: 'Product', text: line.productName },
       { label: 'Warehouse', text: line.warehouseName },
       { label: 'Current / on hand', text: number(line.onHand) },
@@ -1732,12 +1684,11 @@ ${issues
  * @param {object} options
  * @returns {string}
  */
-export function renderIssueViewPage({ issue, line, flash = null }) {
+export function renderIssueViewPage({ issue, line }) {
   return renderRecordPage({
     title: `${issue.type}: ${issue.sku}`,
     activePath: '/alerts',
     lede: `Detected at ${issue.warehouseName}.`,
-    flash,
     note:
       'This issue is not a record. It is recalculated from the source data every time this page is loaded, so it cannot be dismissed here and it disappears by itself once the stock figures no longer meet the condition.',
     actions: [
@@ -1758,6 +1709,7 @@ export function renderIssueViewPage({ issue, line, flash = null }) {
         html: `<span class="pill ${escapeHtml(issueClass(issue.type))}">${escapeHtml(issue.type)}</span>`,
       },
       { label: 'SKU', text: issue.sku },
+      { label: 'Image', html: productThumb(issue, issue.productName, 56) },
       { label: 'Product', text: issue.productName },
       { label: 'Warehouse', text: issue.warehouseName },
       { label: 'Why it was raised', text: issue.detail },
@@ -1778,8 +1730,8 @@ export function renderIssueViewPage({ issue, line, flash = null }) {
  * One transfer: what moved, from where to where, and every SKU line under it.
  *
  * The header figures are the whole movement summed; the table below is the
- * lines it is made of. 303 of the 776 transfers in the source moved more than
- * one SKU in a single edit, so the lines are the record and the header is the
+ * lines it is made of. Hundreds of transfers in the source moved more than one
+ * SKU in a single edit, so the lines are the record and the header is the
  * summary of them - not the other way round.
  *
  * Out and In are both shown because they can differ. When they do, the shelf
@@ -1790,13 +1742,14 @@ export function renderIssueViewPage({ issue, line, flash = null }) {
  * @param {object} options
  * @returns {string}
  */
-export function renderTransferViewPage({ transfer, flash = null }) {
+export function renderTransferViewPage({ transfer }) {
   const adjusted = transfer.quantityOut !== transfer.quantityIn;
 
   const lines = transfer.lines
     .map(
       (line) => `          <tr>
             <td class="sku">${escapeHtml(line.sku)}</td>
+            ${imageCell(line, line.productName)}
             <td class="name">${escapeHtml(line.productName)}</td>
             <td class="num">${escapeHtml(number(line.quantity))}</td>
             <td class="num">${escapeHtml(number(line.quantityOut))}</td>
@@ -1808,7 +1761,7 @@ export function renderTransferViewPage({ transfer, flash = null }) {
     .join('\n');
 
   const head =
-    '<th>SKU</th><th>Product</th><th class="num">Qty</th><th class="num">Out</th><th class="num">In</th><th>Status</th><th class="row-actions">Action</th>';
+    '<th>SKU</th><th>Image</th><th>Product</th><th class="num">Qty</th><th class="num">Out</th><th class="num">In</th><th>Status</th><th class="row-actions">Action</th>';
 
   // Counts the lines in the table below, not distinct SKUs: the same SKU can be
   // edited twice in one event, and a heading of "3 SKU lines" over five rows
@@ -1821,7 +1774,6 @@ ${tableOrEmpty(lines, head, 'This transfer has no lines.')}`;
     title: `Transfer ${transfer.id}`,
     activePath: '/transfers',
     lede: `${number(transfer.quantity)} units from ${transfer.fromWarehouseName} to ${transfer.toWarehouseName} on ${transfer.raisedOn}.`,
-    flash,
     extra,
     actions: [
       { label: 'Back to transfers', href: '/transfers', tone: 'secondary' },
@@ -1867,18 +1819,18 @@ ${tableOrEmpty(lines, head, 'This transfer has no lines.')}`;
  * @param {object} options
  * @returns {string}
  */
-export function renderAuditViewPage({ row, flash = null }) {
+export function renderAuditViewPage({ row }) {
   return renderRecordPage({
     title: `Audit ${row.id}`,
     activePath: '/audit',
     lede: `${row.sku} counted at ${row.warehouseName}.`,
-    flash,
     actions: [
       { label: 'Back to audit', href: '/audit', tone: 'secondary' },
     ],
     rows: [
       { label: 'Audit ID', text: row.id },
       { label: 'SKU', text: row.sku },
+      { label: 'Image', html: productThumb(row, row.productName, 56) },
       { label: 'Product', text: row.productName },
       { label: 'Warehouse', text: row.warehouseName },
       { label: 'System quantity', text: number(row.systemQuantity) },
@@ -1945,8 +1897,9 @@ export function renderReadOnlyPage() {
 /**
  * The one script in the system, served from this origin as /filters.js.
  *
- * It does exactly one thing: when a control in a list-screen filter bar
- * changes, it navigates to that bar's filtered URL. That is the whole of the
+ * It does two things. When a control in a list-screen filter bar changes, it
+ * navigates to that bar's filtered URL. And when a product image fails to load,
+ * it shows that SKU's placeholder thumbnail instead. That is the whole of the
  * client-side behaviour - no framework, no bundle, no dependency, no other
  * script.
  *
@@ -2044,6 +1997,28 @@ export function renderFilterScript() {
     event.preventDefault();
     apply(form);
   });
+
+  // A product image whose source URL fails to load is replaced by the SKU's
+  // placeholder thumbnail, which the server named on the image itself. The
+  // attribute is removed first, so a placeholder that also failed could never
+  // loop. Error events do not bubble, hence the capture phase - and an image
+  // that had already failed before this file ran is caught by the sweep below.
+  function useFallback(img) {
+    var fallback = img.getAttribute("data-fallback");
+    if (!fallback) return;
+    img.removeAttribute("data-fallback");
+    img.src = fallback;
+  }
+
+  document.addEventListener("error", function (event) {
+    var img = event.target;
+    if (img && img.tagName === "IMG") useFallback(img);
+  }, true);
+
+  var images = document.querySelectorAll("img[data-fallback]");
+  for (var n = 0; n < images.length; n += 1) {
+    if (images[n].complete && images[n].naturalWidth === 0) useFallback(images[n]);
+  }
 })();
 `;
 }

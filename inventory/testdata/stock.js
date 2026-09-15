@@ -81,12 +81,9 @@ const lines = [
 ];
 
 /**
- * The live stock lines for the running session.
- *
- * The array is mutable so store.js can add, replace and remove lines in place
- * when staff use the Add/Edit/Delete screens; each line stays frozen so an edit
- * replaces a record rather than mutating one another screen already holds.
- * Nothing is written to disk - a restart returns the list above.
+ * The stock lines the tests run against, handed to store.js through
+ * memorySource(). Each line is frozen, so no test can change one another test
+ * relies on. Nothing is written anywhere.
  *
  * @type {StockLine[]}
  */

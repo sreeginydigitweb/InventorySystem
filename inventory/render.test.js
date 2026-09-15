@@ -122,8 +122,8 @@ describe('layout', () => {
   });
 
   test('carries exactly one script, from this origin, and no inline handler', () => {
-    // The filter bars apply themselves on change rather than behind an Apply
-    // button, which needs a script. It is one same-origin file and nothing
+    // The filter bars apply themselves on change, which needs a script; the
+    // Apply button is only the no-script fallback. It is one same-origin file and nothing
     // else - no inline handler, no CDN, no dependency - so the CSP can stay at
     // script-src 'self' without ever allowing 'unsafe-inline'.
     assert.deepEqual(page.match(/<script[^>]*>/g), ['<script src="/filters.js" defer>']);
@@ -293,5 +293,23 @@ describe('thumbnails', () => {
   test('escapes the product name it puts in the label', () => {
     const svg = renderThumbnailSvg({ name: '"><script>x</script>', category: 'Bulbs' });
     assert.equal(svg.includes('<script>'), false);
+  });
+});
+
+describe('renderFilterScript: broken product images', () => {
+  const code = renderFilterScript().replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+
+  test('swaps an image that fails to load for the placeholder named on it', () => {
+    assert.match(code, /addEventListener\("error",[\s\S]*?, true\)/);
+    assert.match(code, /getAttribute\("data-fallback"\)/);
+  });
+
+  test('uses the fallback only once, so it cannot loop', () => {
+    assert.match(code, /removeAttribute\("data-fallback"\);\s*img\.src = fallback/);
+  });
+
+  test('also catches images that failed before the script ran', () => {
+    assert.match(code, /querySelectorAll\("img\[data-fallback\]"\)/);
+    assert.match(code, /naturalWidth === 0/);
   });
 });

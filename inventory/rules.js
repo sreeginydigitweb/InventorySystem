@@ -88,9 +88,6 @@ export function makeCatalogue(products, warehouses) {
   };
 }
 
-/** A catalogue that knows nothing, so every reference looks broken. */
-export const EMPTY_CATALOGUE = makeCatalogue([], []);
-
 /**
  * Units sold in the last 90 days at or below which a product counts as
  * slow-moving. A single threshold, stated once.

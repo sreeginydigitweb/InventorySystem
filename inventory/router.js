@@ -8,8 +8,8 @@
  *
  * Filtering happens here rather than in the browser. Each screen reads its
  * filters from the query string, so a filtered view is a normal URL that can be
- * linked to - which is how the dashboard tiles drill through - and the pages
- * need no client-side JavaScript at all.
+ * linked to - which is how the dashboard tiles drill through. The only script,
+ * /filters.js, just applies a filter bar as its controls change.
  *
  * ---------------------------------------------------------------------------
  * EVERY ROUTE IS A READ
@@ -562,8 +562,8 @@ async function issueViewRoute(query) {
  * One transfer, as its header and every SKU line that moved under it.
  *
  * A transfer is a group of history lines sharing a derived reference, so this
- * gathers the group rather than picking the first row carrying the id - 303 of
- * the 776 transfers in the source moved more than one SKU, and showing only the
+ * gathers the group rather than picking the first row carrying the id - hundreds
+ * of transfers in the source moved more than one SKU, and showing only the
  * first of them would misreport the movement.
  */
 async function transferViewRoute(query) {

@@ -19,28 +19,3 @@ export const WAREHOUSES = Object.freeze([
   Object.freeze({ id: 'WH-LDS', name: 'Leeds Overflow', location: 'Leeds' }),
   Object.freeze({ id: 'WH-BRS', name: 'Bristol South West', location: 'Bristol' }),
 ]);
-
-/**
- * Look up a warehouse by identifier.
- *
- * Returns null rather than throwing: stock rows are allowed to reference a
- * warehouse that does not exist, and that is a condition the mismatch rule is
- * meant to detect, not a crash.
- *
- * @param {string} id
- * @returns {Warehouse|null}
- */
-export function findWarehouse(id) {
-  return WAREHOUSES.find((warehouse) => warehouse.id === id) ?? null;
-}
-
-/**
- * Display name for a warehouse identifier, falling back to the raw id so an
- * unknown warehouse is still identifiable on screen.
- *
- * @param {string} id
- * @returns {string}
- */
-export function warehouseName(id) {
-  return findWarehouse(id)?.name ?? id;
-}

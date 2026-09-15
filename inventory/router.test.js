@@ -412,7 +412,7 @@ describe('dashboard', () => {
 describe('products screen', () => {
   test('shows the required columns', async () => {
     const { body } = await get('/products');
-    for (const heading of ['SKU', 'Product Name', 'Category', 'Supplier', 'Image']) {
+    for (const heading of ['SKU', 'Product', 'Category', 'Supplier', 'Image']) {
       assert.ok(body.includes(heading), `missing column ${heading}`);
     }
   });
@@ -883,7 +883,7 @@ describe('transfers screen', () => {
   });
 
   test('View opens the whole movement, not just the row that was clicked', async () => {
-    // 303 of the 776 real transfers move more than one SKU under one
+    // Hundreds of real transfers move more than one SKU under one
     // reference. Opening one must show all of its lines.
     const { body } = await get('/transfers', 'q=TR-GROUP01');
     const [first] = [...body.matchAll(/href="(\/transfers\/view[^"]*)"/g)].map((match) =>
@@ -1847,5 +1847,186 @@ describe('transfers search runs over the whole set, before the page window', () 
     assert.equal(both.matched, MATCHING);
     assert.equal(both.total, transfers.length);
     assert.ok(both.matched < both.total, 'the decoys were not excluded');
+  });
+});
+
+describe('a product image beside every SKU', () => {
+  /** The column headings of the first table in the given markup, in order. */
+  const headings = (body) =>
+    [...body.split('<thead>')[1].split('</thead>')[0].matchAll(/<th[^>]*>([^<]*)<\/th>/g)].map((m) => m[1]);
+
+  /** One thumbnail's attributes. */
+  const thumb = (html) => {
+    const m = /<img class="thumb" src="([^"]*)" alt="([^"]*)" width="(\d+)" height="\d+"(?: data-fallback="([^"]*)")?>/.exec(html ?? '');
+    return m && { src: m[1].replaceAll('&amp;', '&'), alt: m[2].replaceAll('&amp;', '&'), size: Number(m[3]), fallback: m[4] ?? null };
+  };
+
+  /** Each table row: the SKU cell's text and the image in the cell after it. */
+  const rowImages = (body, skuColumn) =>
+    tableRows(body).map((row) => {
+      const cells = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[0]);
+      return {
+        sku: cells[skuColumn].replace(/<[^>]+>/g, ''),
+        nextToSku: /^<td class="thumb-cell">/.test(cells[skuColumn + 1] ?? ''),
+        ...thumb(cells[skuColumn + 1]),
+      };
+    });
+
+  /** The detail-page field that immediately follows the SKU field. */
+  const detailAfterSku = (body) => {
+    const m = /<dt[^>]*>SKU<\/dt>\s*<dd[^>]*>([^<]*)<\/dd>\s*<dt[^>]*>([^<]*)<\/dt>\s*<dd[^>]*>([\s\S]*?)<\/dd>/.exec(body);
+    return m && { sku: m[1].replaceAll('&amp;', '&'), label: m[2], ...thumb(m[3]) };
+  };
+
+  /** What the image for a SKU must be: the product's own, or that SKU's placeholder. */
+  const expectedFor = (sku) => {
+    const product = PRODUCTS.find((p) => p.sku === sku);
+    return { src: product ? product.image : `/images/${sku}.svg`, alt: product ? product.name : 'Unknown SKU' };
+  };
+
+  const assertRows = (label, rows) => {
+    assert.ok(rows.length > 0, `${label} rendered no rows`);
+    for (const row of rows) {
+      const expected = expectedFor(row.sku);
+      assert.ok(row.nextToSku, `${label} ${row.sku}: the image is not immediately after the SKU`);
+      assert.equal(row.src, expected.src, `${label} ${row.sku}: wrong image`);
+      assert.equal(row.alt, expected.alt, `${label} ${row.sku}: wrong alt text`);
+      assert.equal(row.size, 40, `${label} ${row.sku}: inconsistent thumbnail size`);
+    }
+  };
+
+  describe('column order', () => {
+    const cases = {
+      '/products': ['SKU', 'Image', 'Product', 'Category', 'Supplier', 'Listing', 'Units held', 'Stock', 'Action'],
+      '/stock': ['SKU', 'Image', 'Product', 'Warehouse', 'Current', 'Reserved', 'Available', 'Status', 'Action'],
+      '/alerts': ['Issue', 'SKU', 'Image', 'Product', 'Warehouse', 'Available', 'Why it was raised', 'Action'],
+      '/transfers': ['Reference', 'SKU', 'Image', 'Product', 'From', 'To', 'Qty', 'Status', 'Date', 'Recorded by', 'Reason', 'Action'],
+      '/audit': ['SKU', 'Image', 'Product', 'Warehouse', 'System Qty', 'Counted Qty', 'Difference', 'Result', 'Counted', 'Action'],
+    };
+
+    for (const [path, expected] of Object.entries(cases)) {
+      test(`${path} puts Image immediately after SKU`, async () => {
+        assert.deepEqual(headings((await get(path)).body), expected);
+      });
+    }
+
+    test('the transfer view SKU lines put Image immediately after SKU', async () => {
+      const { body } = await get('/transfers/view', 'id=TR-GROUP01');
+      assert.deepEqual(headings(body.split('<h2>')[1]), ['SKU', 'Image', 'Product', 'Qty', 'Out', 'In', 'Status', 'Action']);
+    });
+  });
+
+  test('every list row shows the image of its own SKU', async () => {
+    for (const [path, skuColumn] of [['/products', 0], ['/stock', 0], ['/alerts', 1], ['/transfers', 1], ['/audit', 0]]) {
+      assertRows(path, rowImages((await get(path)).body, skuColumn));
+    }
+  });
+
+  test('every SKU line on a transfer view shows the image of its own SKU', async () => {
+    const { body } = await get('/transfers/view', 'id=TR-GROUP01');
+    const rows = rowImages(body.split('<h2>')[1], 0);
+    assert.deepEqual(rows.map((r) => r.sku), ['SIC-1001', 'SIC-1002', 'SIC-2001']);
+    assertRows('/transfers/view', rows);
+  });
+
+  test('every detail page shows the image in the field right after the SKU', async () => {
+    const { body: alerts } = await get('/alerts');
+    const issueUrl = new URL(/href="(\/alerts\/view\?[^"]*)"/.exec(alerts)[1].replaceAll('&amp;', '&'), 'http://x');
+
+    for (const [label, path, query, sku] of [
+      ['product view', '/products/view', 'sku=SIC-2002', 'SIC-2002'],
+      ['stock view', '/stock/view', 'sku=SIC-3001&warehouse=WH-LDS', 'SIC-3001'],
+      ['issue view', '/alerts/view', issueUrl.searchParams.toString(), issueUrl.searchParams.get('sku')],
+      ['audit view', '/audit/view', 'id=AC-1002', 'SIC-1002'],
+    ]) {
+      const { status, body } = await get(path, query);
+      assert.equal(status, 200, `${label} did not render`);
+      const field = detailAfterSku(body);
+      assert.ok(field, `${label}: no field follows the SKU`);
+      assert.equal(field.sku, sku, `${label}: unexpected SKU`);
+      assert.equal(field.label, 'Image', `${label}: the field after SKU is ${field.label}`);
+      assert.equal(field.src, expectedFor(sku).src, `${label}: wrong image`);
+      assert.equal(field.alt, expectedFor(sku).alt, `${label}: wrong alt text`);
+      assert.equal(field.size, 56, `${label}: inconsistent detail thumbnail size`);
+      assert.equal((body.match(/<dt[^>]*>Image<\/dt>/g) ?? []).length, 1, `${label}: more than one Image field`);
+    }
+  });
+
+  test('a SKU missing from the catalogue gets its placeholder, with nothing to fall back to', async () => {
+    const [row] = rowImages((await get('/stock', 'q=SIC-9999')).body, 0);
+    assert.equal(row.src, '/images/SIC-9999.svg');
+    assert.equal(row.fallback, null, 'a placeholder should not name itself as its own fallback');
+  });
+
+  test('search, filters and pagination keep each image with its SKU', async () => {
+    for (const [path, query, skuColumn] of [
+      ['/products', 'q=bulb&stock=Healthy', 0],
+      ['/stock', 'warehouse=WH-BIR&status=Low+Stock', 0],
+      ['/alerts', 'type=Slow-Moving+Stock&q=sic', 1],
+      ['/transfers', 'status=Received&from=WH-BIR', 1],
+      ['/audit', 'show=discrepancy', 0],
+    ]) {
+      assertRows(`${path}?${query}`, rowImages((await get(path, query)).body, skuColumn));
+    }
+  });
+
+  describe('with a real image in the source', () => {
+    const photographed = 'https://sin1.contabostorage.com/product/SIC-1001.png';
+
+    before(() =>
+      useSource(
+        memorySource({
+          products: PRODUCTS.map((p) => (p.sku === 'SIC-1001' ? { ...p, image: photographed } : p)),
+          warehouses: WAREHOUSES,
+          stockLines: STOCK_LINES,
+          transfers: TRANSFERS,
+          auditCounts: AUDIT_COUNTS,
+        }),
+      ),
+    );
+
+    after(() =>
+      useSource(
+        memorySource({
+          products: PRODUCTS,
+          warehouses: WAREHOUSES,
+          stockLines: STOCK_LINES,
+          transfers: TRANSFERS,
+          auditCounts: AUDIT_COUNTS,
+        }),
+      ),
+    );
+
+    test('every page uses the source image, with that SKU\'s placeholder as its fallback', async () => {
+      for (const [path, query, skuColumn] of [
+        ['/products', 'q=SIC-1001', 0],
+        ['/stock', 'q=SIC-1001', 0],
+        ['/alerts', 'q=SIC-1001', 1],
+        ['/transfers', 'q=SIC-1001', 1],
+        ['/audit', '', 0],
+      ]) {
+        const rows = rowImages((await get(path, query)).body, skuColumn).filter((r) => r.sku === 'SIC-1001');
+        assert.ok(rows.length > 0, `${path} has no SIC-1001 row`);
+        for (const row of rows) {
+          assert.equal(row.src, photographed, `${path} is not using the source image`);
+          assert.equal(row.fallback, '/images/SIC-1001.svg', `${path} has no placeholder to fall back to`);
+        }
+      }
+
+      const line = rowImages((await get('/transfers/view', 'id=TR-GROUP01')).body.split('<h2>')[1], 0).find((r) => r.sku === 'SIC-1001');
+      assert.equal(line.src, photographed);
+
+      for (const [path, query] of [['/products/view', 'sku=SIC-1001'], ['/stock/view', 'sku=SIC-1001&warehouse=WH-BIR'], ['/audit/view', 'id=AC-1001']]) {
+        const field = detailAfterSku((await get(path, query)).body);
+        assert.equal(field.src, photographed, `${path} is not using the source image`);
+        assert.equal(field.fallback, '/images/SIC-1001.svg');
+      }
+    });
+
+    test('two SKUs on one page never swap images', async () => {
+      const rows = rowImages((await get('/transfers/view', 'id=TR-GROUP01')).body.split('<h2>')[1], 0);
+      assert.equal(rows.find((r) => r.sku === 'SIC-1001').src, photographed);
+      assert.equal(rows.find((r) => r.sku === 'SIC-1002').src, '/images/SIC-1002.svg');
+    });
   });
 });

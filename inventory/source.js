@@ -401,7 +401,7 @@ export function stockLines() {
  *   SKUs that moved together in one event, which is how one transfer comes to
  *   carry many SKU lines.
  *
- *   A workflow status. Across all 10,615 transfer lines, "pending" appears
+ *   A workflow status. Across all 10,615 stock-change lines, "pending" appears
  *   zero times, "in transit" zero times and "awaiting" zero times. Every line
  *   records a move ALREADY applied to both warehouses, so the only honest
  *   status is Received. Where the two legs disagree - stock moved and the

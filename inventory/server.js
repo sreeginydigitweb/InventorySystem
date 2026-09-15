@@ -20,7 +20,7 @@ import { createServer } from 'node:http';
 
 import { route, routeForm } from './router.js';
 import { renderNotFoundPage } from './render.js';
-import { checkConnection, closePool } from './db.js';
+import { checkConnection, closePool, getPool } from './db.js';
 
 /** Port used when INVENTORY_PORT is not set. */
 export const DEFAULT_PORT = 3000;
@@ -119,8 +119,8 @@ const SECURITY_HEADERS = Object.freeze({
  */
 export function createInventoryServer() {
   return createServer(async (req, res) => {
-    // Reading is a GET; the only thing that can change data is a POST from one
-    // of the record forms. Nothing else is accepted.
+    // Reading is a GET or HEAD. A POST is accepted only to be answered with the
+    // read-only page below. Nothing else is accepted.
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {
       res.writeHead(405, {
         allow: 'GET, HEAD, POST',
@@ -172,6 +172,17 @@ async function main() {
     where = await checkConnection();
   } catch (error) {
     console.error('[inventory] cannot start:', error.message);
+    // 53300: the database role's connection limit is already used up. This
+    // application holds nothing at this point - it is other sessions on the
+    // same role - so say so, rather than leaving it to look like a fault here.
+    if (error.code === '53300') {
+      console.error(
+        '[inventory] Every connection allowed for this database role is in use by other sessions ' +
+          '(for example open pgAdmin tabs or query tools). Close the ones that are no longer ' +
+          'needed, then start again. This application needs at most ' +
+          `${getPool().options.max} connections.`,
+      );
+    }
     process.exitCode = 1;
     await closePool();
     return;

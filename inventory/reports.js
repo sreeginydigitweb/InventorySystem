@@ -32,6 +32,7 @@ import {
   allStockLines,
   allTransfers,
   allWarehouses,
+  imagePathFor,
   productImage,
 } from './store.js';
 
@@ -72,6 +73,28 @@ const productName = (data, sku) => data.catalogue.findProduct(sku)?.name ?? 'Unk
 const warehouseName = (data, id) => data.catalogue.findWarehouse(id)?.name ?? id;
 
 /**
+ * The image fields for a SKU - the one image mapping every screen uses.
+ *
+ *   image             productImage(): the product's own image from the source,
+ *                     or the placeholder thumbnail the server draws for that SKU
+ *                     when it has none. A SKU not in the catalogue gets the
+ *                     placeholder too.
+ *   imagePlaceholder  imagePathFor(): that same SKU's placeholder, which the page
+ *                     swaps in if the source image fails to load.
+ *
+ * Both are looked up by the row's own SKU, so an image can only ever be the one
+ * belonging to the SKU printed beside it.
+ *
+ * @param {object} data
+ * @param {string} sku
+ * @returns {{image: string, imagePlaceholder: string}}
+ */
+const productImageFor = (data, sku) => ({
+  image: productImage(data.catalogue.findProduct(sku) ?? { sku, image: null }),
+  imagePlaceholder: imagePathFor(sku),
+});
+
+/**
  * Every stock line, with available stock and health band worked out, and with
  * the product and warehouse names attached for display.
  *
@@ -84,6 +107,7 @@ export async function stockReport(data) {
   return snap.stockLines.map((line) => ({
     ...describeStockLine(line),
     productName: productName(snap, line.sku),
+    ...productImageFor(snap, line.sku),
     warehouseName: warehouseName(snap, line.warehouseId),
   }));
 }
@@ -118,6 +142,7 @@ export async function issuesReport(data) {
       ...issue,
       key: `${issue.type}|${issue.sku}|${issue.warehouseId}`,
       productName: productName(snap, issue.sku),
+      ...productImageFor(snap, issue.sku),
       warehouseName: warehouseName(snap, issue.warehouseId),
     }))
     .sort(
@@ -145,6 +170,7 @@ export async function transfersReport(data) {
   return snap.transfers.map((transfer) => ({
     ...transfer,
     productName: productName(snap, transfer.sku),
+    ...productImageFor(snap, transfer.sku),
     fromWarehouseName: warehouseName(snap, transfer.fromWarehouseId),
     toWarehouseName: warehouseName(snap, transfer.toWarehouseId),
   }));
@@ -205,6 +231,7 @@ export async function auditReport(data) {
       difference,
       matches: difference === 0,
       productName: productName(snap, count.sku),
+      ...productImageFor(snap, count.sku),
       warehouseName: warehouseName(snap, count.warehouseId),
     };
   });
@@ -324,7 +351,7 @@ export async function productsReport(data) {
 
     return {
       ...product,
-      image: productImage(product),
+      ...productImageFor(snap, product.sku),
       unitsHeld: position.onHand,
       reserved: position.reserved,
       available: position.available,

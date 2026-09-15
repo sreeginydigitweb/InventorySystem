@@ -88,8 +88,8 @@ export function memorySource(data = {}) {
  *
  * This list used to be Pending / In Transit / Received - a workflow the source
  * has no trace of. Every transfer record in ledsone is a stock change that has
- * ALREADY been applied to both warehouses: searching the whole log finds
- * "pending" zero times, "in transit" zero times and "awaiting" zero times.
+ * ALREADY been applied to both warehouses: searching every stock-change entry
+ * in the log finds "pending" zero times, "in transit" zero times and "awaiting" zero times.
  * Offering those two as filters meant two of the three dropdown options could
  * only ever return an empty screen.
  *
@@ -211,16 +211,6 @@ export async function allWarehouses() {
 }
 
 /**
- * One warehouse, or null when the identifier is not a real site.
- *
- * @param {string} id
- * @returns {Promise<object|null>}
- */
-export async function findWarehouse(id) {
-  return (await allWarehouses()).find((warehouse) => warehouse.id === id) ?? null;
-}
-
-/**
  * Every stock line.
  *
  * @returns {Promise<object[]>}
@@ -254,30 +244,10 @@ export async function allTransfers() {
 }
 
 /**
- * One transfer, by identifier.
- *
- * @param {string} id
- * @returns {Promise<object|null>}
- */
-export async function findTransfer(id) {
-  return (await allTransfers()).find((transfer) => transfer.id === id) ?? null;
-}
-
-/**
  * Every physical stock count the source holds.
  *
  * @returns {Promise<object[]>}
  */
 export async function allAuditCounts() {
   return source.auditCounts();
-}
-
-/**
- * One stock count, by identifier.
- *
- * @param {string} id
- * @returns {Promise<object|null>}
- */
-export async function findAuditCount(id) {
-  return (await allAuditCounts()).find((count) => count.id === id) ?? null;
 }
